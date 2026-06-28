@@ -644,7 +644,130 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
       };
     }).toList();
   }
+  Future<List<String>> _checkNewUploads() async {
+    final supabase = Supabase.instance.client;
+    final user = supabase.auth.currentUser;
+    if (user == null) return [];
 
+    final membership = await supabase
+        .from('group_members')
+        .select()
+        .eq('group_id', widget.group['id'])
+        .eq('user_id', user.id)
+        .maybeSingle();
+
+    if (membership == null) return [];
+    if (membership['notify_uploads'] == false) return [];
+
+    final lastSeen = membership['last_seen_at'];
+
+    var query = supabase
+        .from('submissions')
+        .select()
+        .eq('group_id', widget.group['id'])
+        .neq('user_id', user.id);
+
+    if (lastSeen != null) {
+      query = query.gt('submitted_at', lastSeen);
+    }
+
+    final newSubmissions = await query;
+
+    // Mark "seen" now, so this banner doesn't repeat next time.
+    await supabase
+        .from('group_members')
+        .update({'last_seen_at': DateTime.now().toIso8601String()})
+        .eq('group_id', widget.group['id'])
+        .eq('user_id', user.id);
+
+    if (newSubmissions.isEmpty) return [];
+
+    final userIds = newSubmissions.map((s) => s['user_id']).toSet().toList();
+    final users = await supabase
+        .from('users')
+        .select()
+        .inFilter('id', userIds);
+
+    return userIds.map((id) {
+      final u = users.firstWhere(
+        (u) => u['id'] == id,
+        orElse: () => {'username': 'Someone'},
+      );
+      return u['username'] as String;
+    }).toList();
+  }
+  Future<int> _checkPendingJudging() async {
+    final supabase = Supabase.instance.client;
+    final user = supabase.auth.currentUser;
+    if (user == null) return 0;
+
+    final membership = await supabase
+        .from('group_members')
+        .select()
+        .eq('group_id', widget.group['id'])
+        .eq('user_id', user.id)
+        .maybeSingle();
+
+    if (membership == null) return 0;
+    if (membership['role'] != 'judge') return 0;
+    if (membership['notify_judge_reminder'] == false) return 0;
+
+    final today = DateTime.now();
+    final startOfDay = DateTime(today.year, today.month, today.day);
+    final endOfDay = startOfDay.add(const Duration(days: 1));
+
+    final submissions = await supabase
+        .from('submissions')
+        .select()
+        .eq('group_id', widget.group['id'])
+        .gte('submitted_at', startOfDay.toIso8601String())
+        .lt('submitted_at', endOfDay.toIso8601String());
+
+    if (submissions.isEmpty) return 0;
+
+    final submissionIds = submissions.map((s) => s['id']).toList();
+
+    final myScores = await supabase
+        .from('scores')
+        .select()
+        .inFilter('submission_id', submissionIds)
+        .eq('judge_id', user.id);
+
+    final scoredIds = myScores.map((s) => s['submission_id']).toSet();
+
+    return submissions
+        .where((s) => !scoredIds.contains(s['id']))
+        .length;
+  }
+Future<int> _unreadChatCount() async {
+    final supabase = Supabase.instance.client;
+    final user = supabase.auth.currentUser;
+    if (user == null) return 0;
+
+    final membership = await supabase
+        .from('group_members')
+        .select()
+        .eq('group_id', widget.group['id'])
+        .eq('user_id', user.id)
+        .maybeSingle();
+
+    if (membership == null) return 0;
+    if (membership['notify_chat'] == false) return 0;
+
+    final lastRead = membership['last_chat_read_at'];
+
+    var query = supabase
+        .from('messages')
+        .select()
+        .eq('group_id', widget.group['id']);
+
+    if (lastRead != null) {
+      query = query.gt('created_at', lastRead);
+    }
+
+    final unread = await query;
+    return unread.length;
+  }
   Future<void> _generateInvite(String role) async {
     final supabase = Supabase.instance.client;
     final user = supabase.auth.currentUser;
@@ -702,7 +825,7 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
                     builder: (_) => SettingsPage(group: widget.group),
                   ),
                 );
-              } else if (value == 'rules') {
+           } else if (value == 'rules') {
                 Navigator.push(
                   context,
                   MaterialPageRoute(
@@ -712,12 +835,23 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
                     ),
                   ),
                 );
+              } else if (value == 'notifications') {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => NotificationSettingsPage(group: widget.group),
+                  ),
+                );
               }
             },
             itemBuilder: (context) => [
               const PopupMenuItem(
                 value: 'rules',
                 child: Text('Rules'),
+              ),
+              const PopupMenuItem(
+                value: 'notifications',
+                child: Text('Notifications'),
               ),
               if (isOwner) ...[
                 const PopupMenuItem(
@@ -752,7 +886,58 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
               ),
               const SizedBox(height: 10),
               const Text('Group Dashboard'),
-              const SizedBox(height: 30),
+              const SizedBox(height: 20),
+              FutureBuilder<List<String>>(
+                future: _checkNewUploads(),
+                builder: (context, snapshot) {
+                  final names = snapshot.data ?? [];
+                  if (names.isEmpty) return const SizedBox.shrink();
+
+                  final text = names.length == 1
+                      ? '📸 ${names.first} just uploaded their photo!'
+                      : '📸 ${names.join(', ')} just uploaded their photos!';
+
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 16),
+                    child: Card(
+                      color: const Color(0xFFE10600).withOpacity(0.15),
+                      child: Padding(
+                        padding: const EdgeInsets.all(14),
+                        child: Text(
+                          text,
+                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              ),
+              FutureBuilder<int>(
+                future: _checkPendingJudging(),
+                builder: (context, snapshot) {
+                  final pending = snapshot.data ?? 0;
+                  if (pending == 0) return const SizedBox.shrink();
+
+                  final text = pending == 1
+                      ? '⚖️ 1 photo is waiting for your score!'
+                      : '⚖️ $pending photos are waiting for your score!';
+
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 16),
+                    child: Card(
+                      color: Colors.amber.withOpacity(0.15),
+                      child: Padding(
+                        padding: const EdgeInsets.all(14),
+                        child: Text(
+                          text,
+                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              ),
+              const SizedBox(height: 10),
               FutureBuilder<List<dynamic>>(
                 future: fetchMembersWithNames(),
                 builder: (context, snapshot) {
@@ -1081,18 +1266,29 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
                 icon: const Icon(Icons.calendar_month),
                 label: const Text('Calendar'),
               ),
-              const SizedBox(height: 12),
-              ElevatedButton.icon(
-                onPressed: () {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (_) => ChatPage(group: widget.group),
+            const SizedBox(height: 12),
+              FutureBuilder<int>(
+                future: _unreadChatCount(),
+                builder: (context, snapshot) {
+                  final unreadCount = snapshot.data ?? 0;
+
+                  return ElevatedButton.icon(
+                    onPressed: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => ChatPage(group: widget.group),
+                        ),
+                      ).then((_) => setState(() {}));
+                    },
+                    icon: const Icon(Icons.chat_bubble),
+                    label: Text(
+                      unreadCount > 0
+                          ? 'Group Chat ($unreadCount)'
+                          : 'Group Chat',
                     ),
                   );
                 },
-                icon: const Icon(Icons.chat_bubble),
-                label: const Text('Group Chat'),
               ),
             ],
           ),
@@ -3008,10 +3204,11 @@ class _ChatPageState extends State<ChatPage> {
   bool _loading = true;
   late final Stream<List<Map<String, dynamic>>> _messageStream;
 
-  @override
+ @override
   void initState() {
     super.initState();
     _loadUsernames();
+    _markChatAsRead();
 
     _messageStream = supabase
         .from('messages')
@@ -3051,6 +3248,16 @@ class _ChatPageState extends State<ChatPage> {
         for (final u in users) u['id'] as String: (u['username'] ?? 'Unknown') as String,
       };
     });
+  }
+  Future<void> _markChatAsRead() async {
+    final user = supabase.auth.currentUser;
+    if (user == null) return;
+
+    await supabase
+        .from('group_members')
+        .update({'last_chat_read_at': DateTime.now().toIso8601String()})
+        .eq('group_id', widget.group['id'])
+        .eq('user_id', user.id);
   }
 
   void _scrollToBottom() {
@@ -3294,6 +3501,140 @@ final Map<String, Future<String>> _signedUrlCache = {};
           ),
         ],
       ),
+    );
+  }
+}class NotificationSettingsPage extends StatefulWidget {
+  final dynamic group;
+
+  const NotificationSettingsPage({super.key, required this.group});
+
+  @override
+  State<NotificationSettingsPage> createState() => _NotificationSettingsPageState();
+}
+
+class _NotificationSettingsPageState extends State<NotificationSettingsPage> {
+  bool _notifyChat = true;
+  bool _notifyUploads = true;
+  bool _notifyJudgeReminder = true;
+  bool _loading = true;
+  bool _saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final supabase = Supabase.instance.client;
+    final user = supabase.auth.currentUser;
+    if (user == null) return;
+
+    try {
+      final membership = await supabase
+          .from('group_members')
+          .select()
+          .eq('group_id', widget.group['id'])
+          .eq('user_id', user.id)
+          .single();
+
+      if (!mounted) return;
+
+      setState(() {
+        _notifyChat = membership['notify_chat'] ?? true;
+        _notifyUploads = membership['notify_uploads'] ?? true;
+        _notifyJudgeReminder = membership['notify_judge_reminder'] ?? true;
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _update(String column, bool value) async {
+    final supabase = Supabase.instance.client;
+    final user = supabase.auth.currentUser;
+    if (user == null) return;
+
+    setState(() {
+      if (column == 'notify_chat') _notifyChat = value;
+      if (column == 'notify_uploads') _notifyUploads = value;
+      if (column == 'notify_judge_reminder') _notifyJudgeReminder = value;
+      _saving = true;
+    });
+
+    try {
+      final result = await supabase
+          .from('group_members')
+          .update({column: value})
+          .eq('group_id', widget.group['id'])
+          .eq('user_id', user.id)
+          .select();
+
+      if (!mounted) return;
+
+      if (result.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Save blocked by database permissions')),
+        );
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error saving: $e')),
+      );
+    }
+
+    if (!mounted) return;
+    setState(() => _saving = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Notifications')),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : Padding(
+              padding: const EdgeInsets.all(20),
+              child: Column(
+                children: [
+                  Card(
+                    child: SwitchListTile(
+                      title: const Text('Chat Messages'),
+                      subtitle: const Text('Alert me about new chat messages'),
+                      value: _notifyChat,
+                      onChanged: _saving
+                          ? null
+                          : (v) => _update('notify_chat', v),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Card(
+                    child: SwitchListTile(
+                      title: const Text('Photo Uploads'),
+                      subtitle: const Text('Alert me when a player uploads a photo'),
+                      value: _notifyUploads,
+                      onChanged: _saving
+                          ? null
+                          : (v) => _update('notify_uploads', v),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Card(
+                    child: SwitchListTile(
+                      title: const Text('Judge Reminders'),
+                      subtitle: const Text('Remind me to score waiting photos'),
+                      value: _notifyJudgeReminder,
+                      onChanged: _saving
+                          ? null
+                          : (v) => _update('notify_judge_reminder', v),
+                    ),
+                  ),
+                ],
+              ),
+            ),
     );
   }
 }
