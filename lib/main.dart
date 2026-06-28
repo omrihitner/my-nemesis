@@ -5,6 +5,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:table_calendar/table_calendar.dart';
 import 'package:video_player/video_player.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:flutter/services.dart';
 
 const supabaseUrl = 'https://pwlidahqnfczjgqikzzy.supabase.co';
 const supabaseAnonKey = 'sb_publishable_xDxJd7g0SvwMtQ9L-1BATQ__ql0v8Ay';
@@ -789,7 +790,21 @@ Future<int> _unreadChatCount() async {
       context: context,
       builder: (_) => AlertDialog(
         title: Text(role == 'judge' ? 'Judge Invite Code' : 'Invite Code'),
-        content: Text(inviteCode),
+        content: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Expanded(child: Text(inviteCode)),
+            IconButton(
+              icon: const Icon(Icons.copy, size: 20),
+              onPressed: () {
+                Clipboard.setData(ClipboardData(text: inviteCode));
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Copied to clipboard')),
+                );
+              },
+            ),
+          ],
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
@@ -835,11 +850,18 @@ Future<int> _unreadChatCount() async {
                     ),
                   ),
                 );
-              } else if (value == 'notifications') {
+           } else if (value == 'notifications') {
                 Navigator.push(
                   context,
                   MaterialPageRoute(
                     builder: (_) => NotificationSettingsPage(group: widget.group),
+                  ),
+                );
+              } else if (value == 'manage_members') {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => ManageMembersPage(group: widget.group),
                   ),
                 );
               }
@@ -853,7 +875,11 @@ Future<int> _unreadChatCount() async {
                 value: 'notifications',
                 child: Text('Notifications'),
               ),
-              if (isOwner) ...[
+             if (isOwner) ...[
+                const PopupMenuItem(
+                  value: 'manage_members',
+                  child: Text('Manage Members'),
+                ),
                 const PopupMenuItem(
                   value: 'player_invite',
                   child: Text('Generate Player Invite'),
@@ -3634,6 +3660,152 @@ class _NotificationSettingsPageState extends State<NotificationSettingsPage> {
                   ),
                 ],
               ),
+            ),
+    );
+  }
+}
+class ManageMembersPage extends StatefulWidget {
+  final dynamic group;
+
+  const ManageMembersPage({super.key, required this.group});
+
+  @override
+  State<ManageMembersPage> createState() => _ManageMembersPageState();
+}
+
+class _ManageMembersPageState extends State<ManageMembersPage> {
+  final supabase = Supabase.instance.client;
+  List<Map<String, dynamic>> _members = [];
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadMembers();
+  }
+
+  Future<void> _loadMembers() async {
+    setState(() => _loading = true);
+
+    final members = await supabase
+        .from('group_members')
+        .select()
+        .eq('group_id', widget.group['id']);
+
+    final userIds = members.map((m) => m['user_id']).toList();
+
+    final users = await supabase
+        .from('users')
+        .select()
+        .inFilter('id', userIds);
+
+    final combined = members.map<Map<String, dynamic>>((m) {
+      final user = users.firstWhere(
+        (u) => u['id'] == m['user_id'],
+        orElse: () => {'username': 'Unknown'},
+      );
+      return {
+        'id': m['id'],
+        'user_id': m['user_id'],
+        'username': user['username'],
+        'role': m['role'],
+      };
+    }).toList();
+
+    if (!mounted) return;
+    setState(() {
+      _members = combined;
+      _loading = false;
+    });
+  }
+
+  Future<void> _removeMember(Map<String, dynamic> member) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Remove Member'),
+        content: Text(
+          'Remove ${member['username']} from this group? This cannot be undone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Remove'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    try {
+      final result = await supabase
+          .from('group_members')
+          .delete()
+          .eq('id', member['id'])
+          .select();
+
+      if (!mounted) return;
+
+      if (result.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Remove blocked by database permissions')),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('${member['username']} removed')),
+        );
+        _loadMembers();
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error removing member: $e')),
+      );
+    }
+  }
+
+  String _roleIcon(String role) {
+    if (role == 'owner') return '👑';
+    if (role == 'player') return '⚔️';
+    if (role == 'judge') return '⚖️';
+    return '👤';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Manage Members')),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : ListView.builder(
+              padding: const EdgeInsets.all(16),
+              itemCount: _members.length,
+              itemBuilder: (context, index) {
+                final member = _members[index];
+                final isOwnerRow = member['role'] == 'owner';
+
+                return Card(
+                  child: ListTile(
+                    leading: Text(
+                      _roleIcon(member['role']),
+                      style: const TextStyle(fontSize: 24),
+                    ),
+                    title: Text(member['username'] ?? 'Unknown'),
+                    subtitle: Text(member['role']),
+                    trailing: isOwnerRow
+                        ? null
+                        : IconButton(
+                            icon: const Icon(Icons.person_remove, color: Color(0xFFE10600)),
+                            onPressed: () => _removeMember(member),
+                          ),
+                  ),
+                );
+              },
             ),
     );
   }
