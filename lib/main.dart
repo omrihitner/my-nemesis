@@ -697,6 +697,40 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
       return u['username'] as String;
     }).toList();
   }
+ Future<Map<String, int>> _myWarningStatus() async {
+    final supabase = Supabase.instance.client;
+    final user = supabase.auth.currentUser;
+    if (user == null) return {'total': 0, 'unseen': 0};
+
+    final membership = await supabase
+        .from('group_members')
+        .select()
+        .eq('group_id', widget.group['id'])
+        .eq('user_id', user.id)
+        .maybeSingle();
+
+    if (membership == null) return {'total': 0, 'unseen': 0};
+    if (membership['role'] != 'judge') return {'total': 0, 'unseen': 0};
+
+    final total = (membership['warnings'] ?? 0) as int;
+    final acknowledged = (membership['warnings_acknowledged'] ?? 0) as int;
+
+    return {'total': total, 'unseen': total - acknowledged};
+  }
+
+  Future<void> _acknowledgeWarnings(int total) async {
+    final supabase = Supabase.instance.client;
+    final user = supabase.auth.currentUser;
+    if (user == null) return;
+
+    await supabase
+        .from('group_members')
+        .update({'warnings_acknowledged': total})
+        .eq('group_id', widget.group['id'])
+        .eq('user_id', user.id);
+
+    if (mounted) setState(() {});
+  }
   Future<int> _checkPendingJudging() async {
     final supabase = Supabase.instance.client;
     final user = supabase.auth.currentUser;
@@ -932,6 +966,43 @@ Future<int> _unreadChatCount() async {
                         child: Text(
                           text,
                           style: const TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              ),
+              FutureBuilder<Map<String, int>>(
+                future: _myWarningStatus(),
+                builder: (context, snapshot) {
+                  final status = snapshot.data;
+                  if (status == null || status['unseen'] == 0) {
+                    return const SizedBox.shrink();
+                  }
+
+                  final total = status['total']!;
+
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 16),
+                    child: Card(
+                      color: Colors.red.withOpacity(0.15),
+                      child: Padding(
+                        padding: const EdgeInsets.all(14),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                total == 1
+                                    ? '⚠️ You have 1 warning for missed judging.'
+                                    : '⚠️ You have $total warnings for missed judging.',
+                                style: const TextStyle(fontWeight: FontWeight.bold),
+                              ),
+                            ),
+                            TextButton(
+                              onPressed: () => _acknowledgeWarnings(total),
+                              child: const Text('Got it'),
+                            ),
+                          ],
                         ),
                       ),
                     ),
@@ -3709,6 +3780,7 @@ class _ManageMembersPageState extends State<ManageMembersPage> {
         'user_id': m['user_id'],
         'username': user['username'],
         'role': m['role'],
+        'warnings': m['warnings'] ?? 0,
       };
     }).toList();
 
@@ -3768,7 +3840,57 @@ class _ManageMembersPageState extends State<ManageMembersPage> {
       );
     }
   }
+Future<void> _issueWarning(Map<String, dynamic> member) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Issue Warning'),
+        content: Text(
+          'Give ${member['username']} a warning? They currently have ${member['warnings']} warning(s).',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Issue Warning'),
+          ),
+        ],
+      ),
+    );
 
+    if (confirm != true) return;
+
+    try {
+      final newCount = (member['warnings'] as int) + 1;
+
+      final result = await supabase
+          .from('group_members')
+          .update({'warnings': newCount})
+          .eq('id', member['id'])
+          .select();
+
+      if (!mounted) return;
+
+      if (result.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Save blocked by database permissions')),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('${member['username']} now has $newCount warning(s)')),
+        );
+        _loadMembers();
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error issuing warning: $e')),
+      );
+    }
+  }
   String _roleIcon(String role) {
     if (role == 'owner') return '👑';
     if (role == 'player') return '⚔️';
@@ -3789,6 +3911,9 @@ class _ManageMembersPageState extends State<ManageMembersPage> {
                 final member = _members[index];
                 final isOwnerRow = member['role'] == 'owner';
 
+                final isJudge = member['role'] == 'judge';
+                final warnings = member['warnings'] as int;
+
                 return Card(
                   child: ListTile(
                     leading: Text(
@@ -3796,12 +3921,26 @@ class _ManageMembersPageState extends State<ManageMembersPage> {
                       style: const TextStyle(fontSize: 24),
                     ),
                     title: Text(member['username'] ?? 'Unknown'),
-                    subtitle: Text(member['role']),
+                    subtitle: Text(
+                      isJudge && warnings > 0
+                          ? '${member['role']} • ⚠️ $warnings warning(s)'
+                          : member['role'],
+                    ),
                     trailing: isOwnerRow
                         ? null
-                        : IconButton(
-                            icon: const Icon(Icons.person_remove, color: Color(0xFFE10600)),
-                            onPressed: () => _removeMember(member),
+                        : Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              if (isJudge)
+                                IconButton(
+                                  icon: const Icon(Icons.warning_amber, color: Colors.amber),
+                                  onPressed: () => _issueWarning(member),
+                                ),
+                              IconButton(
+                                icon: const Icon(Icons.person_remove, color: Color(0xFFE10600)),
+                                onPressed: () => _removeMember(member),
+                              ),
+                            ],
                           ),
                   ),
                 );
