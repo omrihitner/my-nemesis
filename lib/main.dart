@@ -3019,10 +3019,13 @@ class _ChatPageState extends State<ChatPage> {
         .eq('group_id', widget.group['id'])
         .order('created_at');
 
-    _messageStream.listen((data) {
+ _messageStream.listen((data) {
       if (!mounted) return;
+      final sorted = [...data]
+        ..sort((a, b) => (a['created_at'] as String)
+            .compareTo(b['created_at'] as String));
       setState(() {
-        _messages = data;
+        _messages = sorted;
         _loading = false;
       });
       _scrollToBottom();
@@ -3060,7 +3063,79 @@ class _ChatPageState extends State<ChatPage> {
       );
     });
   }
+final Map<String, Future<String>> _signedUrlCache = {};
 
+  Future<String> _getSignedUrl(String path) {
+    return _signedUrlCache.putIfAbsent(
+      path,
+      () => supabase.storage.from('Photos').createSignedUrl(path, 60 * 60),
+    );
+  }
+
+  bool _uploadingPhoto = false;
+
+  Future<void> _pickAndSendImage(ImageSource source) async {
+    final user = supabase.auth.currentUser;
+    if (user == null) return;
+    if (_uploadingPhoto) return;
+
+    setState(() => _uploadingPhoto = true);
+
+    try {
+      final picker = ImagePicker();
+      final image = await picker.pickImage(source: source);
+      if (image == null) return;
+
+      final file = File(image.path);
+      final filePath =
+          'chat/${widget.group['id']}/${user.id}/${DateTime.now().millisecondsSinceEpoch}.jpg';
+
+      await supabase.storage.from('Photos').upload(filePath, file);
+
+      await supabase.from('messages').insert({
+        'group_id': widget.group['id'],
+        'user_id': user.id,
+        'content': '',
+        'image_url': filePath,
+      });
+   } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error sending photo: $e')),
+      );
+    }
+
+    if (!mounted) return;
+    setState(() => _uploadingPhoto = false);
+  }
+
+  void _showAttachmentOptions() {
+    showModalBottomSheet(
+      context: context,
+      builder: (context) => SafeArea(
+        child: Wrap(
+          children: [
+            ListTile(
+              leading: const Icon(Icons.camera_alt),
+              title: const Text('Take Photo'),
+              onTap: () {
+                Navigator.pop(context);
+                _pickAndSendImage(ImageSource.camera);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.photo_library),
+              title: const Text('Choose from Gallery'),
+              onTap: () {
+                Navigator.pop(context);
+                _pickAndSendImage(ImageSource.gallery);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
   Future<void> _sendMessage() async {
     final text = _messageController.text.trim();
     if (text.isEmpty) return;
@@ -3134,7 +3209,7 @@ class _ChatPageState extends State<ChatPage> {
                                     : const Color(0xFF1A1A1A),
                                 borderRadius: BorderRadius.circular(16),
                               ),
-                              child: Column(
+                           child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   if (!isMe)
@@ -3149,10 +3224,40 @@ class _ChatPageState extends State<ChatPage> {
                                         ),
                                       ),
                                     ),
-                                  Text(
-                                    msg['content'] ?? '',
-                                    style: const TextStyle(color: Colors.white),
-                                  ),
+                                  if (msg['image_url'] != null)
+                                    FutureBuilder<String>(
+                                      future: _getSignedUrl(msg['image_url']),
+                                      builder: (context, snapshot) {
+                                        if (!snapshot.hasData) {
+                                          return const Padding(
+                                            padding: EdgeInsets.all(12),
+                                            child: SizedBox(
+                                              width: 24,
+                                              height: 24,
+                                              child: CircularProgressIndicator(
+                                                strokeWidth: 2,
+                                              ),
+                                            ),
+                                          );
+                                        }
+                                        return ClipRRect(
+                                          borderRadius: BorderRadius.circular(12),
+                                          child: Image.network(
+                                            snapshot.data!,
+                                            width: 200,
+                                            fit: BoxFit.cover,
+                                          ),
+                                        );
+                                      },
+                                    ),
+                                  if ((msg['content'] ?? '').isNotEmpty)
+                                    Padding(
+                                      padding: const EdgeInsets.only(top: 4),
+                                      child: Text(
+                                        msg['content'],
+                                        style: const TextStyle(color: Colors.white),
+                                      ),
+                                    ),
                                 ],
                               ),
                             ),
@@ -3165,6 +3270,10 @@ class _ChatPageState extends State<ChatPage> {
               padding: const EdgeInsets.all(12),
               child: Row(
                 children: [
+         IconButton(
+                    onPressed: _showAttachmentOptions,
+                    icon: const Icon(Icons.add_a_photo_outlined),
+                  ),
                   Expanded(
                     child: TextField(
                       controller: _messageController,
