@@ -126,6 +126,7 @@ class _LoginPageState extends State<LoginPage> {
   final passwordController = TextEditingController();
 
   bool isLoading = false;
+  bool _showPassword = false;
 
   late VideoPlayerController _logoController;
 
@@ -160,34 +161,71 @@ class _LoginPageState extends State<LoginPage> {
     super.dispose();
   }
 
-  Future<void> signUp() async {
+Future<void> signUp() async {
+    final email = emailController.text.trim();
+    final password = passwordController.text.trim();
+
+    if (email.isEmpty) {
+      showError('Please enter your email.');
+      return;
+    }
+    if (password.isEmpty) {
+      showError('Please enter a password.');
+      return;
+    }
+    if (password.length < 6) {
+      showError('Password must be at least 6 characters.');
+      return;
+    }
+
     setState(() => isLoading = true);
 
     try {
       await Supabase.instance.client.auth.signUp(
-        email: emailController.text.trim(),
-        password: passwordController.text.trim(),
+        email: email,
+        password: password,
       );
 
       if (!mounted) return;
 
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Account created. Try logging in.')),
+        const SnackBar(content: Text('Account created! You can now log in.')),
       );
     } catch (e) {
-      showError(e.toString());
+      final message = e.toString().toLowerCase();
+      if (message.contains('already registered') || message.contains('already exists')) {
+        showError('An account with this email already exists. Try logging in.');
+      } else if (message.contains('invalid email') || message.contains('valid email')) {
+        showError('Please enter a valid email address.');
+      } else if (message.contains('network') || message.contains('socket')) {
+        showError('No internet connection. Please check your network.');
+      } else {
+        showError('Something went wrong. Please try again.');
+      }
     }
 
     setState(() => isLoading = false);
   }
 
-  Future<void> login() async {
+Future<void> login() async {
+    final email = emailController.text.trim();
+    final password = passwordController.text.trim();
+
+    if (email.isEmpty) {
+      showError('Please enter your email.');
+      return;
+    }
+    if (password.isEmpty) {
+      showError('Please enter your password.');
+      return;
+    }
+
     setState(() => isLoading = true);
 
     try {
       await Supabase.instance.client.auth.signInWithPassword(
-        email: emailController.text.trim(),
-        password: passwordController.text.trim(),
+        email: email,
+        password: password,
       );
 
       if (!mounted) return;
@@ -197,16 +235,46 @@ class _LoginPageState extends State<LoginPage> {
         MaterialPageRoute(builder: (_) => const HomePage()),
       );
     } catch (e) {
-      showError(e.toString());
+      final message = e.toString().toLowerCase();
+      if (message.contains('invalid') || message.contains('credentials')) {
+        showError('Wrong email or password. Please try again.');
+      } else if (message.contains('network') || message.contains('socket')) {
+        showError('No internet connection. Please check your network.');
+      } else if (message.contains('too many')) {
+        showError('Too many attempts. Please wait a moment and try again.');
+      } else {
+        showError('Something went wrong. Please try again.');
+      }
     }
 
     setState(() => isLoading = false);
   }
-
-  void showError(String message) {
+void showError(String message) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(message)),
     );
+  }
+Future<void> _forgotPassword() async {
+    final email = emailController.text.trim();
+
+    if (email.isEmpty) {
+      showError('Enter your email above first, then tap Forgot Password.');
+      return;
+    }
+
+    try {
+      await Supabase.instance.client.auth.resetPasswordForEmail(email);
+
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Password reset email sent. Check your inbox.'),
+        ),
+      );
+    } catch (e) {
+      showError('Something went wrong. Please try again.');
+    }
   }
 
   @override
@@ -231,13 +299,22 @@ _logoController.value.isInitialized
                 decoration: const InputDecoration(labelText: 'Email'),
               ),
               const SizedBox(height: 16),
-              TextField(
+TextField(
                 controller: passwordController,
-                obscureText: true,
-                decoration: const InputDecoration(labelText: 'Password'),
+                obscureText: !_showPassword,
+                decoration: InputDecoration(
+                  labelText: 'Password',
+                  suffixIcon: IconButton(
+                    icon: Icon(
+                      _showPassword ? Icons.visibility_off : Icons.visibility,
+                    ),
+                    onPressed: () =>
+                        setState(() => _showPassword = !_showPassword),
+                  ),
+                ),
               ),
               const SizedBox(height: 24),
-              if (isLoading)
+             if (isLoading)
                 const Center(child: CircularProgressIndicator())
               else ...[
                 ElevatedButton(
@@ -247,6 +324,10 @@ _logoController.value.isInitialized
                 TextButton(
                   onPressed: signUp,
                   child: const Text('Create Account'),
+                ),
+                TextButton(
+                  onPressed: _forgotPassword,
+                  child: const Text('Forgot Password?'),
                 ),
               ],
             ],
@@ -931,8 +1012,11 @@ Future<int> _unreadChatCount() async {
           ),
         ],
       ),
-      body: SingleChildScrollView(
-        child: Padding(
+body: RefreshIndicator(
+        onRefresh: () async => setState(() {}),
+        child: SingleChildScrollView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          child: Padding(
           padding: const EdgeInsets.all(20),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1388,8 +1472,9 @@ Future<int> _unreadChatCount() async {
                 },
               ),
             ],
-          ),
+     ),
         ),
+      ),
       ),
     );
   }
@@ -1965,162 +2050,158 @@ class BattleHistoryPage extends StatelessWidget {
     super.key,
     required this.group,
   });
-Future<List<Map<String, dynamic>>> fetchHistory() async {
-  final supabase = Supabase.instance.client;
 
-  final submissions = await supabase
-      .from('submissions')
-      .select()
-      .eq('group_id', group['id'])
-      .order('submitted_at', ascending: false);
+  Future<List<Map<String, dynamic>>> fetchHistory() async {
+    final supabase = Supabase.instance.client;
 
-  final scores = await supabase.from('scores').select();
-  final users = await supabase.from('users').select();
+    final submissions = await supabase
+        .from('submissions')
+        .select()
+        .eq('group_id', group['id'])
+        .order('submitted_at', ascending: false);
 
-  final days = <String, Map<String, dynamic>>{};
+    final scores = await supabase.from('scores').select();
+    final users = await supabase.from('users').select();
 
-  for (final submission in submissions) {
-    final submittedAt = submission['submitted_at'];
-    final dateKey = submittedAt.toString().split('T').first;
-    final userId = submission['user_id'];
+    final days = <String, Map<String, dynamic>>{};
 
-    days.putIfAbsent(dateKey, () {
-      return {
-        'date': submittedAt,
-        'totals': <String, int>{},
-        'submittedTimes': <String, String>{},
-      };
-    });
+    for (final submission in submissions) {
+      final submittedAt = submission['submitted_at'];
+      final dateKey = submittedAt.toString().split('T').first;
+      final userId = submission['user_id'];
 
-    final totals = days[dateKey]!['totals'] as Map<String, int>;
-    final submittedTimes = days[dateKey]!['submittedTimes'] as Map<String, String>;
-    submittedTimes[userId] = submittedAt.toString();
+      days.putIfAbsent(dateKey, () {
+        return {
+          'date': submittedAt,
+          'totals': <String, int>{},
+          'submittedTimes': <String, String>{},
+        };
+      });
 
-    final submissionScores = scores.where(
-      (score) => score['submission_id'] == submission['id'],
-    );
+      final totals = days[dateKey]!['totals'] as Map<String, int>;
+      final submittedTimes = days[dateKey]!['submittedTimes'] as Map<String, String>;
+      submittedTimes[userId] = submittedAt.toString();
 
-    for (final score in submissionScores) {
-      totals[userId] = (totals[userId] ?? 0) + ((score['score'] ?? 0) as int);
-    }
-  }
-
-  final history = <Map<String, dynamic>>[];
-
-for (final day in days.values) {
-    final totals = day['totals'] as Map<String, int>;
-    final submittedTimes = day['submittedTimes'] as Map<String, String>;
-
-    String winnerName = 'No scores yet';
-
-    if (totals.isNotEmpty) {
-      final maxScore = totals.values.reduce((a, b) => a > b ? a : b);
-      final topUserIds = totals.entries
-          .where((e) => e.value == maxScore)
-          .map((e) => e.key)
-          .toList();
-
-      // Tie-break: earliest submission wins.
-      topUserIds.sort(
-        (a, b) => submittedTimes[a]!.compareTo(submittedTimes[b]!),
-      );
-      final winnerId = topUserIds.first;
-
-      final winnerUser = users.firstWhere(
-        (user) => user['id'] == winnerId,
-        orElse: () => {'username': 'Unknown'},
+      final submissionScores = scores.where(
+        (score) => score['submission_id'] == submission['id'],
       );
 
-      winnerName = winnerUser['username'];
+      for (final score in submissionScores) {
+        totals[userId] = (totals[userId] ?? 0) + ((score['score'] ?? 0) as int);
+      }
     }
 
-history.add({
-  'date': day['date'],
-  'dateKey': day['date'].toString().split('T').first,
-  'winner': winnerName,
-});
+    final history = <Map<String, dynamic>>[];
+
+    for (final day in days.values) {
+      final totals = day['totals'] as Map<String, int>;
+      final submittedTimes = day['submittedTimes'] as Map<String, String>;
+
+      String winnerName = 'No scores yet';
+
+      if (totals.isNotEmpty) {
+        final maxScore = totals.values.reduce((a, b) => a > b ? a : b);
+        final topUserIds = totals.entries
+            .where((e) => e.value == maxScore)
+            .map((e) => e.key)
+            .toList();
+
+        topUserIds.sort(
+          (a, b) => submittedTimes[a]!.compareTo(submittedTimes[b]!),
+        );
+        final winnerId = topUserIds.first;
+
+        final winnerUser = users.firstWhere(
+          (user) => user['id'] == winnerId,
+          orElse: () => {'username': 'Unknown'},
+        );
+
+        winnerName = winnerUser['username'];
+      }
+
+      history.add({
+        'date': day['date'],
+        'dateKey': day['date'].toString().split('T').first,
+        'winner': winnerName,
+      });
+    }
+
+    return history;
   }
 
-  return history;
-}
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Battle History'),
       ),
-body: FutureBuilder<List<Map<String, dynamic>>>(
-  future: fetchHistory(),
-  builder: (context, snapshot) {
-    if (snapshot.connectionState == ConnectionState.waiting) {
-      return const Center(child: CircularProgressIndicator());
-    }
+      body: StatefulBuilder(
+        builder: (context, setLocalState) {
+          return RefreshIndicator(
+            onRefresh: () async => setLocalState(() {}),
+            child: FutureBuilder<List<Map<String, dynamic>>>(
+              future: fetchHistory(),
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const Center(child: CircularProgressIndicator());
+                }
 
-    if (snapshot.hasError) {
-      return Center(child: Text('Error: ${snapshot.error}'));
-    }
+                if (snapshot.hasError) {
+                  return Center(child: Text('Error: ${snapshot.error}'));
+                }
 
-    final history = snapshot.data ?? [];
+                final history = snapshot.data ?? [];
 
-    if (history.isEmpty) {
-      return const Center(child: Text('No battle history yet'));
-    }
+                if (history.isEmpty) {
+                  return const Center(child: Text('No battle history yet'));
+                }
 
-    return ListView.builder(
-      padding: const EdgeInsets.all(16),
-      itemCount: history.length,
-      itemBuilder: (context, index) {
-        final item = history[index];
+                return ListView.builder(
+                  padding: const EdgeInsets.all(16),
+                  itemCount: history.length,
+                  itemBuilder: (context, index) {
+                    final item = history[index];
 
-        return Card(
-         child: ListTile(
-  onTap: () {
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => BattleDetailsPage(
-          group: group,
-          item: item,
-        ),
-      ),
-    );
-  },
-            leading: const Text(
-              '📅',
-              style: TextStyle(fontSize: 28),
+                    return Card(
+                      child: ListTile(
+                        onTap: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => BattleDetailsPage(
+                                group: group,
+                                item: item,
+                              ),
+                            ),
+                          );
+                        },
+                        leading: const Text(
+                          '📅',
+                          style: TextStyle(fontSize: 28),
+                        ),
+                        title: Text(
+                          '🏆 ${item['winner']}',
+                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                        subtitle: Text(
+                          (() {
+                            final date = DateTime.parse(item['date']);
+                            const months = [
+                              'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                              'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+                            ];
+                            return '${date.day} ${months[date.month - 1]} ${date.year}';
+                          })(),
+                        ),
+                      ),
+                    );
+                  },
+                );
+              },
             ),
-            title: Text(
-  '🏆 ${item['winner']}',
-  style: const TextStyle(fontWeight: FontWeight.bold),
-),
-subtitle: Text(
-  (() {
-    final date = DateTime.parse(item['date']);
-
-    const months = [
-      'Jan',
-      'Feb',
-      'Mar',
-      'Apr',
-      'May',
-      'Jun',
-      'Jul',
-      'Aug',
-      'Sep',
-      'Oct',
-      'Nov',
-      'Dec',
-    ];
-
-    return '${date.day} ${months[date.month - 1]} ${date.year}';
-  })(),
-),
-          ),
-        );
-      },
-    );
-  },
-),
+          );
+        },
+      ),
     );
   }
 }
