@@ -388,6 +388,15 @@ class _HomePageState extends State<HomePage> {
         title: const Text('My Nemesis'),
         actions: [
           IconButton(
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const ProfilePage()),
+              );
+            },
+            icon: const Icon(Icons.account_circle),
+          ),
+          IconButton(
             onPressed: () async {
               await logout();
               if (!context.mounted) return;
@@ -427,9 +436,11 @@ class _HomePageState extends State<HomePage> {
 
                   final groups = snapshot.data ?? [];
 
-                  if (groups.isEmpty) {
-                    return const Center(
-                      child: Text('No groups yet. Create your first group.'),
+                if (groups.isEmpty) {
+                    return const _EmptyState(
+                      icon: Icons.group_off,
+                      title: 'No groups yet',
+                      subtitle: 'Create your first group or join one with an invite code.',
                     );
                   }
 
@@ -972,6 +983,13 @@ Future<int> _unreadChatCount() async {
                     builder: (_) => NotificationSettingsPage(group: widget.group),
                   ),
                 );
+              } else if (value == 'profile') {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => const ProfilePage(),
+                  ),
+                );
               } else if (value == 'manage_members') {
                 Navigator.push(
                   context,
@@ -981,7 +999,11 @@ Future<int> _unreadChatCount() async {
                 );
               }
             },
-            itemBuilder: (context) => [
+          itemBuilder: (context) => [
+              const PopupMenuItem(
+                value: 'profile',
+                child: Text('My Profile'),
+              ),
               const PopupMenuItem(
                 value: 'rules',
                 child: Text('Rules'),
@@ -1144,27 +1166,58 @@ body: RefreshIndicator(
 
                   final members = snapshot.data ?? [];
 
+               const List<Color> palette = [
+                    Colors.redAccent,
+                    Colors.blueAccent,
+                    Colors.greenAccent,
+                    Colors.purpleAccent,
+                    Colors.orangeAccent,
+                    Colors.tealAccent,
+                    Colors.pinkAccent,
+                    Colors.amberAccent,
+                  ];
+
                   return Card(
-                    child: ListTile(
-                      leading: const Icon(Icons.people),
-                      title: Text(
-                        '👥 Members (${members.length})',
-                        style: const TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                      subtitle: Text(
-                        members.map((m) {
-                          String icon = '👤';
+                    child: Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '👥 Members (${members.length})',
+                            style: const TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                          const SizedBox(height: 12),
+                          ...members.asMap().entries.map((entry) {
+                            final index = entry.key;
+                            final m = entry.value;
+                            final color = palette[index % palette.length];
 
-                          if (m['role'] == 'owner') {
-                            icon = '👑';
-                          } else if (m['role'] == 'player') {
-                            icon = '⚔️';
-                          } else if (m['role'] == 'judge') {
-                            icon = '⚖️';
-                          }
+                            String roleIcon = '👤';
+                            if (m['role'] == 'owner') roleIcon = '👑';
+                            else if (m['role'] == 'player') roleIcon = '⚔️';
+                            else if (m['role'] == 'judge') roleIcon = '⚖️';
 
-                          return '$icon ${m['username']}';
-                        }).join('\n'),
+                            return Padding(
+                              padding: const EdgeInsets.symmetric(vertical: 4),
+                              child: Row(
+                                children: [
+                                  _MemberAvatar(
+                                    username: m['username'] ?? '?',
+                                    color: color,
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    child: Text(
+                                      '$roleIcon ${m['username']}',
+                                      style: const TextStyle(fontSize: 15),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            );
+                          }),
+                        ],
                       ),
                     ),
                   );
@@ -1706,8 +1759,12 @@ final groupData = await supabase
 
           final submissions = snapshot.data ?? [];
 
-          if (submissions.isEmpty) {
-            return const Center(child: Text('No photos submitted yet'));
+        if (submissions.isEmpty) {
+            return const _EmptyState(
+              icon: Icons.photo_camera,
+              title: 'No photos yet',
+              subtitle: 'Players haven\'t submitted their photos today.',
+            );
           }
 
           return ListView.builder(
@@ -1721,10 +1778,43 @@ final groupData = await supabase
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                  Image.network(
-                      submission['signed_url'],
-                      height: 300,
-                      fit: BoxFit.cover,
+                  GestureDetector(
+                      onTap: () {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => FullScreenPhotoPage(
+                              imageUrl: submission['signed_url'],
+                            ),
+                          ),
+                        );
+                      },
+                      child: Stack(
+                        children: [
+                          Image.network(
+                            submission['signed_url'],
+                            height: 300,
+                            fit: BoxFit.cover,
+                            width: double.infinity,
+                          ),
+                          Positioned(
+                            bottom: 8,
+                            right: 8,
+                            child: Container(
+                              padding: const EdgeInsets.all(6),
+                              decoration: BoxDecoration(
+                                color: Colors.black.withOpacity(0.5),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: const Icon(
+                                Icons.fullscreen,
+                                color: Colors.white,
+                                size: 20,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                     if (submission['username'] != null)
                       Padding(
@@ -1980,8 +2070,12 @@ final submissions = await supabase
 
           final results = snapshot.data ?? [];
 
-          if (results.isEmpty) {
-            return const Center(child: Text('No scores yet'));
+        if (results.isEmpty) {
+            return const _EmptyState(
+              icon: Icons.leaderboard,
+              title: 'No scores yet',
+              subtitle: 'Scores will appear here once photos are judged.',
+            );
           }
 
 final winner = results.first;
@@ -2012,18 +2106,31 @@ return ListView(
 
     const SizedBox(height: 16),
 
-    ...results.asMap().entries.map((entry) {
+...results.asMap().entries.map((entry) {
       final index = entry.key;
       final row = entry.value;
 
-      final icon = index == 0 ? '🏆' : '👤';
+      const List<Color> palette = [
+        Colors.redAccent,
+        Colors.blueAccent,
+        Colors.greenAccent,
+        Colors.purpleAccent,
+        Colors.orangeAccent,
+        Colors.tealAccent,
+        Colors.pinkAccent,
+        Colors.amberAccent,
+      ];
+
+      final color = palette[index % palette.length];
 
       return Card(
         child: ListTile(
-          leading: Text(
-            icon,
-            style: const TextStyle(fontSize: 28),
-          ),
+          leading: index == 0
+              ? const Text('🏆', style: TextStyle(fontSize: 28))
+              : _MemberAvatar(
+                  username: row['username'] ?? '?',
+                  color: color,
+                ),
           title: Text(row['username']),
           subtitle: Text(row['role']),
           trailing: Text(
@@ -2152,8 +2259,12 @@ class BattleHistoryPage extends StatelessWidget {
 
                 final history = snapshot.data ?? [];
 
-                if (history.isEmpty) {
-                  return const Center(child: Text('No battle history yet'));
+               if (history.isEmpty) {
+                  return const _EmptyState(
+                    icon: Icons.history,
+                    title: 'No battles yet',
+                    subtitle: 'Completed battle days will appear here.',
+                  );
                 }
 
                 return ListView.builder(
@@ -2408,11 +2519,44 @@ return Column(
 
         const SizedBox(height: 8),
 
-        Image.network(
-          photo['signed_url'],
-          height: 250,
-          width: double.infinity,
-          fit: BoxFit.cover,
+   GestureDetector(
+          onTap: () {
+            Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => FullScreenPhotoPage(
+                  imageUrl: photo['signed_url'],
+                  username: photo['username'],
+                ),
+              ),
+            );
+          },
+          child: Stack(
+            children: [
+              Image.network(
+                photo['signed_url'],
+                height: 250,
+                width: double.infinity,
+                fit: BoxFit.cover,
+              ),
+              Positioned(
+                bottom: 8,
+                right: 8,
+                child: Container(
+                  padding: const EdgeInsets.all(6),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withOpacity(0.5),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: const Icon(
+                    Icons.fullscreen,
+                    color: Colors.white,
+                    size: 20,
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
         const SizedBox(height: 8),
 
@@ -3565,7 +3709,11 @@ final Map<String, Future<String>> _signedUrlCache = {};
             child: _loading
                 ? const Center(child: CircularProgressIndicator())
                 : _messages.isEmpty
-                    ? const Center(child: Text('No messages yet — say hi!'))
+                    ? const _EmptyState(
+                        icon: Icons.chat_bubble_outline,
+                        title: 'No messages yet',
+                        subtitle: 'Say hi to start the conversation!',
+                      )
                     : ListView.builder(
                         controller: _scrollController,
                         padding: const EdgeInsets.all(16),
@@ -4026,6 +4174,456 @@ Future<void> _issueWarning(Map<String, dynamic> member) async {
                   ),
                 );
               },
+            ),
+    );
+  }
+}
+class FullScreenPhotoPage extends StatelessWidget {
+  final String imageUrl;
+  final String? username;
+
+  const FullScreenPhotoPage({
+    super.key,
+    required this.imageUrl,
+    this.username,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black,
+        foregroundColor: Colors.white,
+        title: Text(username ?? 'Photo'),
+        elevation: 0,
+      ),
+      body: Center(
+        child: InteractiveViewer(
+          minScale: 0.5,
+          maxScale: 4.0,
+          child: Image.network(
+            imageUrl,
+            fit: BoxFit.contain,
+            loadingBuilder: (context, child, progress) {
+              if (progress == null) return child;
+              return const Center(child: CircularProgressIndicator());
+            },
+          ),
+        ),
+      ),
+    );
+  }
+}
+class _EmptyState extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final String? subtitle;
+
+  const _EmptyState({
+    required this.icon,
+    required this.title,
+    this.subtitle,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(40),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              icon,
+              size: 64,
+              color: Colors.white.withOpacity(0.15),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              title,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+                color: Colors.white,
+              ),
+            ),
+            if (subtitle != null) ...[
+              const SizedBox(height: 8),
+              Text(
+                subtitle!,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 14,
+                  color: Colors.white.withOpacity(0.5),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+class _MemberAvatar extends StatelessWidget {
+  final String username;
+  final Color color;
+  final double size;
+
+  const _MemberAvatar({
+    required this.username,
+    required this.color,
+    this.size = 36,
+  });
+
+  String get _initials {
+    final parts = username.trim().split(RegExp(r'[\s@._]+'));
+    if (parts.length >= 2) {
+      return '${parts[0][0]}${parts[1][0]}'.toUpperCase();
+    }
+    return username.isNotEmpty ? username[0].toUpperCase() : '?';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.25),
+        shape: BoxShape.circle,
+        border: Border.all(color: color, width: 1.5),
+      ),
+      child: Center(
+        child: Text(
+          _initials,
+          style: TextStyle(
+            color: color,
+            fontWeight: FontWeight.bold,
+            fontSize: size * 0.38,
+          ),
+        ),
+      ),
+    );
+  }
+}
+class ProfilePage extends StatefulWidget {
+  const ProfilePage({super.key});
+
+  @override
+  State<ProfilePage> createState() => _ProfilePageState();
+}
+
+class _ProfilePageState extends State<ProfilePage> {
+  final supabase = Supabase.instance.client;
+  final _usernameController = TextEditingController();
+  final _newPasswordController = TextEditingController();
+  bool _loading = true;
+  bool _saving = false;
+  bool _showPassword = false;
+  String? _profilePhotoUrl;
+  String? _profilePhotoPath;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadProfile();
+  }
+
+  Future<void> _loadProfile() async {
+    final user = supabase.auth.currentUser;
+    if (user == null) return;
+
+    try {
+      final profile = await supabase
+          .from('users')
+          .select()
+          .eq('id', user.id)
+          .single();
+
+      if (!mounted) return;
+
+      _usernameController.text =
+          profile['display_name'] ?? profile['username'] ?? '';
+      _profilePhotoPath = profile['profile_photo'];
+
+      if (_profilePhotoPath != null) {
+        final url = await supabase.storage
+            .from('Photos')
+            .createSignedUrl(_profilePhotoPath!, 60 * 60);
+        if (!mounted) return;
+        setState(() => _profilePhotoUrl = url);
+      }
+
+      setState(() => _loading = false);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _pickPhoto() async {
+    final user = supabase.auth.currentUser;
+    if (user == null) return;
+
+    try {
+      final picker = ImagePicker();
+      final image = await showModalBottomSheet<XFile?>(
+        context: context,
+        builder: (context) => SafeArea(
+          child: Wrap(
+            children: [
+              ListTile(
+                leading: const Icon(Icons.camera_alt),
+                title: const Text('Take Photo'),
+                onTap: () async {
+                  final img =
+                      await picker.pickImage(source: ImageSource.camera);
+                  if (context.mounted) Navigator.pop(context, img);
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.photo_library),
+                title: const Text('Choose from Gallery'),
+                onTap: () async {
+                  final img =
+                      await picker.pickImage(source: ImageSource.gallery);
+                  if (context.mounted) Navigator.pop(context, img);
+                },
+              ),
+            ],
+          ),
+        ),
+      );
+
+      if (image == null) return;
+
+      final file = File(image.path);
+      final filePath =
+          'profiles/${user.id}/${DateTime.now().millisecondsSinceEpoch}.jpg';
+
+      await supabase.storage.from('Photos').upload(filePath, file);
+
+      final url = await supabase.storage
+          .from('Photos')
+          .createSignedUrl(filePath, 60 * 60);
+
+      await supabase
+          .from('users')
+          .update({'profile_photo': filePath})
+          .eq('id', user.id);
+
+      if (!mounted) return;
+      setState(() {
+        _profilePhotoPath = filePath;
+        _profilePhotoUrl = url;
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Profile photo updated')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error updating photo: $e')),
+      );
+    }
+  }
+
+  Future<void> _saveProfile() async {
+    final user = supabase.auth.currentUser;
+    if (user == null) return;
+
+    final newUsername = _usernameController.text.trim();
+    final newPassword = _newPasswordController.text.trim();
+
+    if (newUsername.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Username cannot be empty.')),
+      );
+      return;
+    }
+
+    setState(() => _saving = true);
+
+    try {
+      await supabase
+          .from('users')
+          .update({'display_name': newUsername, 'username': newUsername})
+          .eq('id', user.id);
+
+      if (newPassword.isNotEmpty) {
+        if (newPassword.length < 6) {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+                content: Text('Password must be at least 6 characters.')),
+          );
+          setState(() => _saving = false);
+          return;
+        }
+        await supabase.auth.updateUser(
+          UserAttributes(password: newPassword),
+        );
+        _newPasswordController.clear();
+      }
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Profile updated')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error saving profile: $e')),
+      );
+    }
+
+    if (!mounted) return;
+    setState(() => _saving = false);
+  }
+
+  @override
+  void dispose() {
+    _usernameController.dispose();
+    _newPasswordController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('My Profile')),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : SingleChildScrollView(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                children: [
+                  GestureDetector(
+                    onTap: _pickPhoto,
+                    child: Stack(
+                      children: [
+                        CircleAvatar(
+                          radius: 54,
+                          backgroundColor:
+                              const Color(0xFFE10600).withOpacity(0.2),
+                          backgroundImage: _profilePhotoUrl != null
+                              ? NetworkImage(_profilePhotoUrl!)
+                              : null,
+                          child: _profilePhotoUrl == null
+                              ? Text(
+                                  _usernameController.text.isNotEmpty
+                                      ? _usernameController.text[0]
+                                          .toUpperCase()
+                                      : '?',
+                                  style: const TextStyle(
+                                    fontSize: 40,
+                                    fontWeight: FontWeight.bold,
+                                    color: Color(0xFFE10600),
+                                  ),
+                                )
+                              : null,
+                        ),
+                        Positioned(
+                          bottom: 0,
+                          right: 0,
+                          child: Container(
+                            padding: const EdgeInsets.all(6),
+                            decoration: const BoxDecoration(
+                              color: Color(0xFFE10600),
+                              shape: BoxShape.circle,
+                            ),
+                            child: const Icon(
+                              Icons.camera_alt,
+                              color: Colors.white,
+                              size: 16,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    supabase.auth.currentUser?.email ?? '',
+                    style: TextStyle(
+                      color: Colors.white.withOpacity(0.5),
+                      fontSize: 13,
+                    ),
+                  ),
+                  const SizedBox(height: 32),
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            'Username',
+                            style: TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                          const SizedBox(height: 8),
+                          TextField(
+                            controller: _usernameController,
+                            decoration: const InputDecoration(
+                              hintText: 'Enter your username',
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            'New Password',
+                            style: TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            'Leave blank to keep your current password',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Colors.white.withOpacity(0.5),
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          TextField(
+                            controller: _newPasswordController,
+                            obscureText: !_showPassword,
+                            decoration: InputDecoration(
+                              hintText: 'New password',
+                              suffixIcon: IconButton(
+                                icon: Icon(_showPassword
+                                    ? Icons.visibility_off
+                                    : Icons.visibility),
+                                onPressed: () => setState(
+                                    () => _showPassword = !_showPassword),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton(
+                      onPressed: _saving ? null : _saveProfile,
+                      child:
+                          Text(_saving ? 'Saving...' : 'Save Changes'),
+                    ),
+                  ),
+                ],
+              ),
             ),
     );
   }
