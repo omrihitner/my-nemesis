@@ -8,6 +8,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 const supabaseUrl = 'https://pwlidahqnfczjgqikzzy.supabase.co';
 const supabaseAnonKey = 'sb_publishable_xDxJd7g0SvwMtQ9L-1BATQ__ql0v8Ay';
@@ -3350,16 +3351,24 @@ class _SplashScreenState extends State<SplashScreen> {
       _controller.play();
     });
 
-    _controller.addListener(() {
+    _controller.addListener(() async {
       final isFinished = !_controller.value.isPlaying &&
           _controller.value.position >= _controller.value.duration &&
           _controller.value.duration > Duration.zero;
 
-      if (isFinished && !_navigated) {
+     if (isFinished && !_navigated) {
         _navigated = true;
+        final prefs = await SharedPreferences.getInstance();
+        final onboardingComplete = prefs.getBool('onboarding_complete') ?? false;
+
+        if (!mounted) return;
         Navigator.pushReplacement(
           context,
-          MaterialPageRoute(builder: (_) => const AuthGate()),
+          MaterialPageRoute(
+            builder: (_) => onboardingComplete
+                ? const AuthGate()
+                : const OnboardingPage(),
+          ),
         );
       }
     });
@@ -4717,6 +4726,197 @@ class _ProfilePageState extends State<ProfilePage> {
                 ],
               ),
             ),
+    );
+  }
+}
+class OnboardingPage extends StatefulWidget {
+  const OnboardingPage({super.key});
+
+  @override
+  State<OnboardingPage> createState() => _OnboardingPageState();
+}
+
+class _OnboardingPageState extends State<OnboardingPage> {
+  final PageController _pageController = PageController();
+  int _currentPage = 0;
+
+  final List<Map<String, dynamic>> _pages = [
+    {
+      'icon': Icons.sports_martial_arts,
+      'title': 'My Nemesis',
+      'subtitle': 'The daily photo battle game',
+      'description':
+          'Challenge your nemesis to a daily photo battle. One photo. One judge. One winner.',
+      'color': Color(0xFFE10600),
+    },
+    {
+      'icon': Icons.camera_alt,
+      'title': 'How it works',
+      'subtitle': 'Simple. Brutal. Fun.',
+      'description':
+          '📸  Submit one random photo per day\n\n⚖️  A judge scores both photos 0–10\n\n🏆  The highest score wins the day\n\n⚡  Tie? First to submit wins',
+      'color': Colors.white,
+    },
+    {
+      'icon': Icons.emoji_events,
+      'title': 'Ready to battle?',
+      'subtitle': 'Create a group and invite your nemesis',
+      'description':
+          'Own a group as the creator, invite players and a judge, and let the battle begin.',
+      'color': Color(0xFFE10600),
+    },
+  ];
+
+  Future<void> _finish() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('onboarding_complete', true);
+
+    if (!mounted) return;
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(builder: (_) => const AuthGate()),
+    );
+  }
+
+  @override
+  void dispose() {
+    _pageController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF0A0A0A),
+      body: SafeArea(
+        child: Column(
+          children: [
+            // Skip button
+            Align(
+              alignment: Alignment.topRight,
+              child: TextButton(
+                onPressed: _finish,
+                child: const Text('Skip'),
+              ),
+            ),
+
+            // Pages
+            Expanded(
+              child: PageView.builder(
+                controller: _pageController,
+                onPageChanged: (index) =>
+                    setState(() => _currentPage = index),
+                itemCount: _pages.length,
+                itemBuilder: (context, index) {
+                  final page = _pages[index];
+                  return Padding(
+                    padding: const EdgeInsets.all(32),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Container(
+                          width: 120,
+                          height: 120,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: (page['color'] as Color).withOpacity(0.15),
+                            border: Border.all(
+                              color: page['color'] as Color,
+                              width: 2,
+                            ),
+                          ),
+                          child: Icon(
+                            page['icon'] as IconData,
+                            size: 56,
+                            color: page['color'] as Color,
+                          ),
+                        ),
+                        const SizedBox(height: 40),
+                        Text(
+                          page['title'] as String,
+                          style: const TextStyle(
+                            fontSize: 32,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white,
+                          ),
+                          textAlign: TextAlign.center,
+                        ),
+                        const SizedBox(height: 12),
+                        Text(
+                          page['subtitle'] as String,
+                          style: TextStyle(
+                            fontSize: 16,
+                            color: page['color'] as Color,
+                            fontWeight: FontWeight.w600,
+                          ),
+                          textAlign: TextAlign.center,
+                        ),
+                        const SizedBox(height: 24),
+                        Text(
+                          page['description'] as String,
+                          style: TextStyle(
+                            fontSize: 15,
+                            color: Colors.white.withOpacity(0.7),
+                            height: 1.6,
+                          ),
+                          textAlign: TextAlign.center,
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ),
+
+            // Dots
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: List.generate(
+                _pages.length,
+                (index) => AnimatedContainer(
+                  duration: const Duration(milliseconds: 250),
+                  margin: const EdgeInsets.symmetric(horizontal: 4),
+                  width: _currentPage == index ? 24 : 8,
+                  height: 8,
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(4),
+                    color: _currentPage == index
+                        ? const Color(0xFFE10600)
+                        : Colors.white.withOpacity(0.3),
+                  ),
+                ),
+              ),
+            ),
+
+            const SizedBox(height: 32),
+
+            // Button
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 32),
+              child: SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: () {
+                    if (_currentPage < _pages.length - 1) {
+                      _pageController.nextPage(
+                        duration: const Duration(milliseconds: 300),
+                        curve: Curves.easeInOut,
+                      );
+                    } else {
+                      _finish();
+                    }
+                  },
+                  child: Text(
+                    _currentPage < _pages.length - 1 ? 'Next' : 'Get Started',
+                  ),
+                ),
+              ),
+            ),
+
+            const SizedBox(height: 32),
+          ],
+        ),
+      ),
     );
   }
 }
