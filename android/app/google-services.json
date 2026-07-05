@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "541449642996",
+    "project_id": "my-nemesis-105ef",
+    "storage_bucket": "my-nemesis-105ef.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:541449642996:android:924190c43b2bf372328fa1",
+        "android_client_info": {
+          "package_name": "com.example.my_nemesis"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDW2fsDVm8wC_9PEZ9aRFlTclcqbnWQEvk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

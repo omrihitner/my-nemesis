@@ -5,13 +5,43 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:table_calendar/table_calendar.dart';
 import 'package:video_player/video_player.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/services.dart';
 
 const supabaseUrl = 'https://pwlidahqnfczjgqikzzy.supabase.co';
 const supabaseAnonKey = 'sb_publishable_xDxJd7g0SvwMtQ9L-1BATQ__ql0v8Ay';
 
+Future<void> sendNotification({
+  required String type,
+  required String groupId,
+  required String senderId,
+  required String senderName,
+}) async {
+  try {
+    await Supabase.instance.client.functions.invoke(
+      'send-notification',
+      body: {
+        'type': type,
+        'groupId': groupId,
+        'senderId': senderId,
+        'senderName': senderName,
+      },
+    );
+  } catch (_) {}
+}
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  await Firebase.initializeApp();
+
+  // Request notification permission
+  final messaging = FirebaseMessaging.instance;
+  await messaging.requestPermission(
+    alert: true,
+    badge: true,
+    sound: true,
+  );
 
   await Supabase.initialize(
     url: supabaseUrl,
@@ -230,6 +260,21 @@ Future<void> login() async {
 
       if (!mounted) return;
 
+// Save this device's push notification token
+      try {
+        final fcmToken = await FirebaseMessaging.instance.getToken();
+        if (fcmToken != null) {
+          final userId = Supabase.instance.client.auth.currentUser?.id;
+          if (userId != null) {
+            await Supabase.instance.client
+                .from('users')
+                .update({'fcm_token': fcmToken})
+                .eq('id', userId);
+          }
+        }
+      } catch (_) {}
+
+      if (!mounted) return;
       Navigator.pushReplacement(
         context,
         MaterialPageRoute(builder: (_) => const HomePage()),
@@ -1426,11 +1471,25 @@ body: RefreshIndicator(
                           .select()
                           .single();
 
+                      // Notify other group members
+                      final userProfile = await supabase
+                          .from('users')
+                          .select()
+                          .eq('id', user.id)
+                          .single();
+
+                      await sendNotification(
+                        type: 'upload',
+                        groupId: widget.group['id'],
+                        senderId: user.id,
+                        senderName: userProfile['username'] ?? 'Someone',
+                      );
+
                       if (!context.mounted) return;
 
                       ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text('Submission saved: ${submission['id']}'),
+                        const SnackBar(
+                          content: Text('Photo submitted! ✅'),
                         ),
                       );
                     } catch (e) {
@@ -1724,7 +1783,7 @@ final groupData = await supabase
     return result;
   }
 
-  Future<void> saveScore(String submissionId, int score) async {
+Future<void> saveScore(String submissionId, int score) async {
     final supabase = Supabase.instance.client;
     final user = supabase.auth.currentUser;
 
@@ -1736,6 +1795,26 @@ final groupData = await supabase
       'score': score,
       'disqualified': false,
     });
+
+    // Notify the photo owner
+    final submission = await supabase
+        .from('submissions')
+        .select()
+        .eq('id', submissionId)
+        .single();
+
+    final judgeProfile = await supabase
+        .from('users')
+        .select()
+        .eq('id', user.id)
+        .single();
+
+    await sendNotification(
+      type: 'score',
+      groupId: submission['group_id'],
+      senderId: user.id,
+      senderName: judgeProfile['username'] ?? 'A judge',
+    );
 
     setState(() {});
   }
@@ -3674,12 +3753,25 @@ final Map<String, Future<String>> _signedUrlCache = {};
 
     _messageController.clear();
 
-    try {
+ try {
       await supabase.from('messages').insert({
         'group_id': widget.group['id'],
         'user_id': user.id,
         'content': text,
       });
+
+      final userProfile = await supabase
+          .from('users')
+          .select()
+          .eq('id', user.id)
+          .single();
+
+      await sendNotification(
+        type: 'chat',
+        groupId: widget.group['id'],
+        senderId: user.id,
+        senderName: userProfile['username'] ?? 'Someone',
+      );
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
