@@ -137,17 +137,17 @@ serve(async (req) => {
       let body = "";
       let shouldSend = false;
 
-      if (type === "chat" && member.notify_chat !== false) {
-        title = "New message in My Nemesis";
-        body = `${senderName}: ${req.body}`;
+      if (type === 'chat' && member.notify_chat !== false) {
+        title = `💬 ${senderName}`;
+        body = "Sent a message in the group chat";
         shouldSend = true;
-      } else if (type === "upload" && member.notify_uploads !== false) {
-        title = "New photo uploaded!";
+      } else if (type === 'upload' && member.notify_uploads !== false) {
+        title = "📸 New photo uploaded!";
         body = `${senderName} just submitted their photo for today's battle.`;
         shouldSend = true;
-      } else if (type === "score" && member.notify_judge_reminder !== false) {
-        title = "Your photo was scored!";
-        body = `A judge has scored your photo in ${senderName}.`;
+      } else if (type === 'score' && member.notify_judge_reminder !== false) {
+        title = "⭐ Your photo was scored!";
+        body = `${senderName} has scored your photo.`;
         shouldSend = true;
       }
 

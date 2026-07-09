@@ -36,6 +36,12 @@ Future<void> main() async {
 
   await Firebase.initializeApp();
 
+  // Lock to portrait mode
+  await SystemChrome.setPreferredOrientations([
+    DeviceOrientation.portraitUp,
+    DeviceOrientation.portraitDown,
+  ]);
+
   // Request notification permission
   final messaging = FirebaseMessaging.instance;
   await messaging.requestPermission(
@@ -60,6 +66,7 @@ class MyNemesisApp extends StatelessWidget {
     return MaterialApp(
       title: 'My Nemesis',
       debugShowCheckedModeBanner: false,
+      scrollBehavior: const MaterialScrollBehavior(),
       theme: ThemeData(
         brightness: Brightness.dark,
         textTheme: GoogleFonts.outfitTextTheme(ThemeData.dark().textTheme),
@@ -111,6 +118,9 @@ class MyNemesisApp extends StatelessWidget {
         ),
         listTileTheme: const ListTileThemeData(
           contentPadding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        ),
+        bottomSheetTheme: const BottomSheetThemeData(
+          backgroundColor: Color(0xFF1A1A1A),
         ),
         switchTheme: SwitchThemeData(
           thumbColor: WidgetStateProperty.resolveWith(
@@ -684,6 +694,7 @@ class GroupDashboardPage extends StatefulWidget {
 
 class _GroupDashboardPageState extends State<GroupDashboardPage> {
   String? _myRole;
+  bool _uploading = false;
 
   @override
   void initState() {
@@ -997,7 +1008,49 @@ Future<int> _unreadChatCount() async {
     return Scaffold(
       appBar: AppBar(
         title: Text(groupName),
-       actions: [
+        actions: [
+          FutureBuilder<int>(
+            future: _unreadChatCount(),
+            builder: (context, snapshot) {
+              final unread = snapshot.data ?? 0;
+              return Stack(
+                alignment: Alignment.center,
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.chat_bubble_outline),
+                    onPressed: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => ChatPage(group: widget.group),
+                        ),
+                      ).then((_) => setState(() {}));
+                    },
+                  ),
+                  if (unread > 0)
+                    Positioned(
+                      top: 8,
+                      right: 6,
+                      child: Container(
+                        padding: const EdgeInsets.all(3),
+                        decoration: const BoxDecoration(
+                          color: Color(0xFFE10600),
+                          shape: BoxShape.circle,
+                        ),
+                        child: Text(
+                          '$unread',
+                          style: const TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white,
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              );
+            },
+          ),
           PopupMenuButton<String>(
             icon: const Icon(Icons.more_vert),
             onSelected: (value) {
@@ -1085,7 +1138,7 @@ body: RefreshIndicator(
         child: SingleChildScrollView(
           physics: const AlwaysScrollableScrollPhysics(),
           child: Padding(
-          padding: const EdgeInsets.all(20),
+            padding: const EdgeInsets.fromLTRB(20, 20, 20, 100),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
@@ -1408,7 +1461,9 @@ body: RefreshIndicator(
               const SizedBox(height: 12),
               if (canUpload)
                 ElevatedButton.icon(
-                  onPressed: () async {
+                onPressed: () async {
+                    if (_uploading) return;
+                    setState(() => _uploading = true);
                     try {
                       final supabase = Supabase.instance.client;
                       final user = supabase.auth.currentUser;
@@ -1502,6 +1557,7 @@ body: RefreshIndicator(
                         ),
                       );
                     }
+                    if (mounted) setState(() => _uploading = false);
                   },
                   icon: const Icon(Icons.camera_alt),
                   label: const Text('Upload Today’s Photo'),
@@ -1560,30 +1616,7 @@ body: RefreshIndicator(
                 icon: const Icon(Icons.calendar_month),
                 label: const Text('Calendar'),
               ),
-            const SizedBox(height: 12),
-              FutureBuilder<int>(
-                future: _unreadChatCount(),
-                builder: (context, snapshot) {
-                  final unreadCount = snapshot.data ?? 0;
-
-                  return ElevatedButton.icon(
-                    onPressed: () {
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (_) => ChatPage(group: widget.group),
-                        ),
-                      ).then((_) => setState(() {}));
-                    },
-                    icon: const Icon(Icons.chat_bubble),
-                    label: Text(
-                      unreadCount > 0
-                          ? 'Group Chat ($unreadCount)'
-                          : 'Group Chat',
-                    ),
-                  );
-                },
-              ),
+            
             ],
      ),
         ),
@@ -1848,7 +1881,7 @@ Future<void> saveScore(String submissionId, int score) async {
           }
 
           return ListView.builder(
-            padding: const EdgeInsets.all(16),
+            padding: EdgeInsets.fromLTRB(16, 16, 16, MediaQuery.of(context).padding.bottom + 16),
             itemCount: submissions.length,
             itemBuilder: (context, index) {
               final submission = submissions[index];
@@ -2161,7 +2194,7 @@ final submissions = await supabase
 final winner = results.first;
 
 return ListView(
-  padding: const EdgeInsets.all(16),
+  padding: EdgeInsets.fromLTRB(16, 16, 16, MediaQuery.of(context).padding.bottom + 16),
   children: [
     Card(
       child: ListTile(
@@ -2348,7 +2381,7 @@ class BattleHistoryPage extends StatelessWidget {
                 }
 
                 return ListView.builder(
-                  padding: const EdgeInsets.all(16),
+                  padding: EdgeInsets.fromLTRB(16, 16, 16, MediaQuery.of(context).padding.bottom + 16),
                   itemCount: history.length,
                   itemBuilder: (context, index) {
                     final item = history[index];
@@ -3112,12 +3145,12 @@ Widget _dayCell(
       appBar: AppBar(
         title: const Text('Calendar'),
       ),
-      body: _loading
+     body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _errorMessage != null
               ? Center(child: Text('Error: $_errorMessage'))
-              : Padding(
-                  padding: const EdgeInsets.all(16),
+              : SingleChildScrollView(
+                  padding: EdgeInsets.fromLTRB(16, 16, 16, MediaQuery.of(context).padding.bottom + 32),
                   child: Column(
                     children: [
                       TableCalendar(
@@ -3800,7 +3833,8 @@ final Map<String, Future<String>> _signedUrlCache = {};
   Widget build(BuildContext context) {
     final myId = supabase.auth.currentUser?.id;
 
-    return Scaffold(
+   return Scaffold(
+      resizeToAvoidBottomInset: true,
       appBar: AppBar(
         title: const Text('Group Chat'),
       ),
@@ -3817,7 +3851,7 @@ final Map<String, Future<String>> _signedUrlCache = {};
                       )
                     : ListView.builder(
                         controller: _scrollController,
-                        padding: const EdgeInsets.all(16),
+                        padding: EdgeInsets.fromLTRB(16, 16, 16, MediaQuery.of(context).padding.bottom + 16),
                         itemCount: _messages.length,
                         itemBuilder: (context, index) {
                           final msg = _messages[index];
