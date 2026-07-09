@@ -9,6 +9,7 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 const supabaseUrl = 'https://pwlidahqnfczjgqikzzy.supabase.co';
 const supabaseAnonKey = 'sb_publishable_xDxJd7g0SvwMtQ9L-1BATQ__ql0v8Ay';
@@ -381,9 +382,19 @@ TextField(
                   onPressed: signUp,
                   child: const Text('Create Account'),
                 ),
-                TextButton(
-                  onPressed: _forgotPassword,
-                  child: const Text('Forgot Password?'),
+            TextButton(
+                  onPressed: () async {
+                    final url = Uri.parse('https://sugared-hellebore-0ba.notion.site/398f6483ef768004b84ffe0c2897d139');
+                    try {
+                      await launchUrl(url, mode: LaunchMode.externalApplication);
+                    } catch (e) {
+                      if (!context.mounted) return;
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Could not open browser. Please try again.')),
+                      );
+                    }
+                  },
+                  child: const Text('Privacy Policy'),
                 ),
               ],
             ],
@@ -465,105 +476,96 @@ class _HomePageState extends State<HomePage> {
           ),
         ],
       ),
-      body: Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          children: [
-            Text('Logged in as: $email'),
-            const SizedBox(height: 30),
-            const Text(
-              'My Groups',
-              style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 20),
-            Expanded(
-              child: FutureBuilder<List<dynamic>>(
-                future: fetchGroups(),
-                builder: (context, snapshot) {
-                  if (snapshot.connectionState == ConnectionState.waiting) {
-                    return const Center(child: CircularProgressIndicator());
-                  }
+  body: RefreshIndicator(
+        onRefresh: () async => setState(() {}),
+        child: FutureBuilder<List<dynamic>>(
+          future: fetchGroups(),
+          builder: (context, snapshot) {
+            final groups = snapshot.data ?? [];
+            final isLoading =
+                snapshot.connectionState == ConnectionState.waiting;
 
-                  if (snapshot.hasError) {
-                    return Center(
-                      child: Text('Error: ${snapshot.error}'),
-                    );
-                  }
-
-                  final groups = snapshot.data ?? [];
-
-                if (groups.isEmpty) {
-                    return const _EmptyState(
-                      icon: Icons.group_off,
-                      title: 'No groups yet',
-                      subtitle: 'Create your first group or join one with an invite code.',
-                    );
-                  }
-
-                  return ListView.builder(
-                    itemCount: groups.length,
-                    itemBuilder: (context, index) {
-                      final group = groups[index];
-
-                    return Card(
-  child: ListTile(
-    title: Text(group['name'] ?? 'Unnamed Group'),
-    subtitle: const Text('You are the owner'),
-    trailing: const Icon(Icons.arrow_forward_ios),
-    onTap: () {
-      Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (_) => GroupDashboardPage(group: group),
-        ),
-      );
-    },
-  ),
-);
-                    },
-                  );
-                },
-              ),
-            ),
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton(
-                onPressed: () async {
-                  final created = await Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (_) => const CreateGroupPage(),
-                    ),
-                  );
-
-                  if (created == true) {
-                    setState(() {});
-                  }
-                },
-                child: const Text('Create Group'),
-              ),
-            ),
-            const SizedBox(height: 12),
-
-SizedBox(
-  width: double.infinity,
-  child: ElevatedButton(
-    onPressed: () async {
-  final joined = await Navigator.push(
-    context,
-    MaterialPageRoute(
-      builder: (_) => const JoinGroupPage(),
-    ),
-  );
-
-  if (joined == true) {
-    setState(() {});
-  }
-},
-    child: const Text('Join Group'),
-  ),
-),
-          ],
+            return Column(
+              children: [
+                Expanded(
+                  child: ListView(
+                    padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
+                    children: [
+                      if (isLoading)
+                        const Center(child: CircularProgressIndicator())
+                      else if (snapshot.hasError)
+                        Center(child: Text('Error: ${snapshot.error}'))
+                      else if (groups.isEmpty)
+                        const _EmptyState(
+                          icon: Icons.group_off,
+                          title: 'No groups yet',
+                          subtitle:
+                              'Create your first group or join one with an invite code.',
+                        )
+                      else
+                        ...groups.map((group) => Card(
+                              child: ListTile(
+                                title:
+                                    Text(group['name'] ?? 'Unnamed Group'),
+                                subtitle: const Text('Tap to open'),
+                                trailing:
+                                    const Icon(Icons.arrow_forward_ios),
+                                onTap: () {
+                                  Navigator.push(
+                                    context,
+                                    MaterialPageRoute(
+                                      builder: (_) =>
+                                          GroupDashboardPage(group: group),
+                                    ),
+                                  );
+                                },
+                              ),
+                            )),
+                    ],
+                  ),
+                ),
+                Padding(
+                  padding: EdgeInsets.fromLTRB(
+                      20, 0, 20, MediaQuery.of(context).padding.bottom + 20),
+                  child: Column(
+                    children: [
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton(
+                          onPressed: () async {
+                            final created = await Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (_) => const CreateGroupPage(),
+                              ),
+                            );
+                            if (created == true) setState(() {});
+                          },
+                          child: const Text('Create Group'),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton(
+                          onPressed: () async {
+                            final joined = await Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (_) => const JoinGroupPage(),
+                              ),
+                            );
+                            if (joined == true) setState(() {});
+                          },
+                          child: const Text('Join Group'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            );
+          },
         ),
       ),
     );
