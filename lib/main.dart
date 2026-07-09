@@ -4567,7 +4567,53 @@ class _ProfilePageState extends State<ProfilePage> {
       );
     }
   }
+Future<void> _showDeleteConfirmation() async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Delete Account'),
+        content: const Text(
+          'This will permanently delete your account, all your photos, messages, and scores. This cannot be undone.\n\nAre you sure?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.red,
+            ),
+            child: const Text('Delete Forever'),
+          ),
+        ],
+      ),
+    );
 
+    if (confirm != true) return;
+
+    try {
+      await supabase.rpc('delete_user_account');
+
+      if (!mounted) return;
+
+      Navigator.pushAndRemoveUntil(
+        context,
+        MaterialPageRoute(builder: (_) => const LoginPage()),
+        (route) => false,
+      );
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Your account has been deleted.')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error deleting account: $e')),
+      );
+    }
+  }
   Future<void> _saveProfile() async {
     final user = supabase.auth.currentUser;
     if (user == null) return;
@@ -4757,6 +4803,22 @@ class _ProfilePageState extends State<ProfilePage> {
                       onPressed: _saving ? null : _saveProfile,
                       child:
                           Text(_saving ? 'Saving...' : 'Save Changes'),
+                    ),
+                  ),
+                  const SizedBox(height: 32),
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton(
+                      onPressed: _showDeleteConfirmation,
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: Colors.red,
+                        side: const BorderSide(color: Colors.red),
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      child: const Text('Delete Account'),
                     ),
                   ),
                 ],
