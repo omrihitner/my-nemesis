@@ -11,6 +11,7 @@ import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+
 const supabaseUrl = 'https://pwlidahqnfczjgqikzzy.supabase.co';
 const supabaseAnonKey = 'sb_publishable_xDxJd7g0SvwMtQ9L-1BATQ__ql0v8Ay';
 
@@ -177,7 +178,6 @@ class _LoginPageState extends State<LoginPage> {
     super.initState();
 
     _logoController = VideoPlayerController.asset('assets/video/splash.mp4');
-
     _logoController.initialize().then((_) {
       if (!mounted) return;
       setState(() {});
@@ -188,9 +188,7 @@ class _LoginPageState extends State<LoginPage> {
       final isFinished = !_logoController.value.isPlaying &&
           _logoController.value.position >= _logoController.value.duration &&
           _logoController.value.duration > Duration.zero;
-
       if (isFinished) {
-        // Freeze on the final frame instead of looping or restarting.
         _logoController.pause();
         _logoController.seekTo(_logoController.value.duration);
       }
@@ -203,53 +201,7 @@ class _LoginPageState extends State<LoginPage> {
     super.dispose();
   }
 
-Future<void> signUp() async {
-    final email = emailController.text.trim();
-    final password = passwordController.text.trim();
-
-    if (email.isEmpty) {
-      showError('Please enter your email.');
-      return;
-    }
-    if (password.isEmpty) {
-      showError('Please enter a password.');
-      return;
-    }
-    if (password.length < 6) {
-      showError('Password must be at least 6 characters.');
-      return;
-    }
-
-    setState(() => isLoading = true);
-
-    try {
-      await Supabase.instance.client.auth.signUp(
-        email: email,
-        password: password,
-      );
-
-      if (!mounted) return;
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Account created! You can now log in.')),
-      );
-    } catch (e) {
-      final message = e.toString().toLowerCase();
-      if (message.contains('already registered') || message.contains('already exists')) {
-        showError('An account with this email already exists. Try logging in.');
-      } else if (message.contains('invalid email') || message.contains('valid email')) {
-        showError('Please enter a valid email address.');
-      } else if (message.contains('network') || message.contains('socket')) {
-        showError('No internet connection. Please check your network.');
-      } else {
-        showError('Something went wrong. Please try again.');
-      }
-    }
-
-    setState(() => isLoading = false);
-  }
-
-Future<void> login() async {
+  Future<void> login() async {
     final email = emailController.text.trim();
     final password = passwordController.text.trim();
 
@@ -272,7 +224,6 @@ Future<void> login() async {
 
       if (!mounted) return;
 
-// Save this device's push notification token
       try {
         final fcmToken = await FirebaseMessaging.instance.getToken();
         if (fcmToken != null) {
@@ -299,6 +250,8 @@ Future<void> login() async {
         showError('No internet connection. Please check your network.');
       } else if (message.contains('too many')) {
         showError('Too many attempts. Please wait a moment and try again.');
+      } else if (message.contains('email') && message.contains('confirm')) {
+        showError('Please confirm your email first. Check your inbox.');
       } else {
         showError('Something went wrong. Please try again.');
       }
@@ -306,12 +259,36 @@ Future<void> login() async {
 
     setState(() => isLoading = false);
   }
-void showError(String message) {
+
+  Future<void> _signInWithGoogle() async {
+    setState(() => isLoading = true);
+
+    try {
+      await Supabase.instance.client.auth.signInWithOAuth(
+        OAuthProvider.google,
+        redirectTo: 'io.supabase.mynemesis://login-callback',
+      );
+
+      if (!mounted) return;
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => const HomePage()),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      showError('Google Sign In failed. Please try again.');
+    }
+
+    if (mounted) setState(() => isLoading = false);
+  }
+
+  void showError(String message) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(message)),
     );
   }
-Future<void> _forgotPassword() async {
+
+  Future<void> _forgotPassword() async {
     final email = emailController.text.trim();
 
     if (email.isEmpty) {
@@ -321,9 +298,7 @@ Future<void> _forgotPassword() async {
 
     try {
       await Supabase.instance.client.auth.resetPasswordForEmail(email);
-
       if (!mounted) return;
-
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Password reset email sent. Check your inbox.'),
@@ -343,7 +318,7 @@ Future<void> _forgotPassword() async {
           child: ListView(
             shrinkWrap: true,
             children: [
-_logoController.value.isInitialized
+              _logoController.value.isInitialized
                   ? SizedBox(
                       height: 280,
                       width: 280 * _logoController.value.aspectRatio,
@@ -354,47 +329,92 @@ _logoController.value.isInitialized
               TextField(
                 controller: emailController,
                 decoration: const InputDecoration(labelText: 'Email'),
+                keyboardType: TextInputType.emailAddress,
               ),
               const SizedBox(height: 16),
-TextField(
+              TextField(
                 controller: passwordController,
                 obscureText: !_showPassword,
                 decoration: InputDecoration(
                   labelText: 'Password',
                   suffixIcon: IconButton(
                     icon: Icon(
-                      _showPassword ? Icons.visibility_off : Icons.visibility,
+                      _showPassword
+                          ? Icons.visibility_off
+                          : Icons.visibility,
                     ),
                     onPressed: () =>
                         setState(() => _showPassword = !_showPassword),
                   ),
                 ),
               ),
-              const SizedBox(height: 24),
-             if (isLoading)
+              Align(
+                alignment: Alignment.centerRight,
+                child: TextButton(
+                  onPressed: _forgotPassword,
+                  child: const Text(
+                    'Forgot Password?',
+                    style: TextStyle(fontSize: 12),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              if (isLoading)
                 const Center(child: CircularProgressIndicator())
               else ...[
                 ElevatedButton(
                   onPressed: login,
                   child: const Text('Login'),
                 ),
-                TextButton(
-                  onPressed: signUp,
-                  child: const Text('Create Account'),
+                const SizedBox(height: 12),
+                OutlinedButton.icon(
+                  onPressed: _signInWithGoogle,
+                  icon: const Text('G', style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white,
+                    fontSize: 16,
+                  )),
+                  label: const Text('Continue with Google'),
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    side: BorderSide(color: Colors.white.withOpacity(0.3)),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
                 ),
-            TextButton(
+                const SizedBox(height: 12),
+                TextButton(
+                  onPressed: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                          builder: (_) => const SignUpPage()),
+                    );
+                  },
+                  child: const Text("Don't have an account? Sign Up"),
+                ),
+                const SizedBox(height: 8),
+                TextButton(
                   onPressed: () async {
-                    final url = Uri.parse('https://sugared-hellebore-0ba.notion.site/398f6483ef768004b84ffe0c2897d139');
+                    final url = Uri.parse(
+                        'https://sugared-hellebore-0ba.notion.site/398f6483ef768004b84ffe0c2897d139');
                     try {
-                      await launchUrl(url, mode: LaunchMode.externalApplication);
+                      await launchUrl(url,
+                          mode: LaunchMode.externalApplication);
                     } catch (e) {
                       if (!context.mounted) return;
                       ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Could not open browser. Please try again.')),
+                        const SnackBar(
+                            content: Text(
+                                'Could not open browser. Please try again.')),
                       );
                     }
                   },
-                  child: const Text('Privacy Policy'),
+                  child: const Text(
+                    'Privacy Policy',
+                    style: TextStyle(fontSize: 12),
+                  ),
                 ),
               ],
             ],
@@ -5012,6 +5032,308 @@ class _OnboardingPageState extends State<OnboardingPage> {
             ),
 
             const SizedBox(height: 32),
+          ],
+        ),
+      ),
+    );
+  }
+}
+class SignUpPage extends StatefulWidget {
+  const SignUpPage({super.key});
+
+  @override
+  State<SignUpPage> createState() => _SignUpPageState();
+}
+
+class _SignUpPageState extends State<SignUpPage> {
+  final _emailController = TextEditingController();
+  final _passwordController = TextEditingController();
+  final _confirmPasswordController = TextEditingController();
+  final _nicknameController = TextEditingController();
+  DateTime? _birthday;
+  bool _showPassword = false;
+  bool _showConfirmPassword = false;
+  bool _isLoading = false;
+
+  // Password rule checkers
+  bool get _hasMinLength => _passwordController.text.length >= 8;
+  bool get _hasUppercase => _passwordController.text.contains(RegExp(r'[A-Z]'));
+  bool get _hasNumber => _passwordController.text.contains(RegExp(r'[0-9]'));
+  bool get _hasSymbol =>
+      _passwordController.text.contains(RegExp(r'[!@#$%^&*(),.?":{}|<>]'));
+  bool get _passwordsMatch =>
+      _passwordController.text == _confirmPasswordController.text &&
+      _confirmPasswordController.text.isNotEmpty;
+
+  Future<void> _pickBirthday() async {
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: DateTime(2000, 1, 1),
+      firstDate: DateTime(1900),
+      lastDate: DateTime.now(),
+      helpText: 'Select your birthday',
+    );
+    if (picked != null) setState(() => _birthday = picked);
+  }
+
+  Future<void> _signUp() async {
+    final email = _emailController.text.trim();
+    final password = _passwordController.text.trim();
+    final nickname = _nicknameController.text.trim();
+
+    if (email.isEmpty) {
+      _showError('Please enter your email.');
+      return;
+    }
+    if (nickname.isEmpty) {
+      _showError('Please enter a nickname.');
+      return;
+    }
+    if (!_hasMinLength || !_hasUppercase || !_hasNumber || !_hasSymbol) {
+      _showError('Password does not meet all requirements.');
+      return;
+    }
+    if (!_passwordsMatch) {
+      _showError('Passwords do not match.');
+      return;
+    }
+
+    setState(() => _isLoading = true);
+
+    try {
+      final response = await Supabase.instance.client.auth.signUp(
+        email: email,
+        password: password,
+      );
+
+      if (response.user != null) {
+        await Supabase.instance.client.from('users').upsert({
+          'id': response.user!.id,
+          'username': nickname,
+          'display_name': nickname,
+          if (_birthday != null) 'birthday': _birthday!.toIso8601String().split('T').first,
+        });
+      }
+
+      if (!mounted) return;
+
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => AlertDialog(
+          title: const Text('Account Created! 🎉'),
+          content: const Text(
+            'We sent a confirmation email to your inbox. Please confirm your email before logging in.',
+          ),
+          actions: [
+            ElevatedButton(
+              onPressed: () {
+                Navigator.pop(context);
+                Navigator.pop(context); // Go back to login
+              },
+              child: const Text('Go to Login'),
+            ),
+          ],
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      final message = e.toString().toLowerCase();
+      if (message.contains('already registered') ||
+          message.contains('already exists')) {
+        _showError('An account with this email already exists.');
+      } else {
+        _showError('Something went wrong. Please try again.');
+      }
+    }
+
+    if (mounted) setState(() => _isLoading = false);
+  }
+
+  void _showError(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
+    );
+  }
+
+  Widget _ruleRow(bool passed, String text) {
+    return Row(
+      children: [
+        Icon(
+          passed ? Icons.check_circle : Icons.cancel,
+          size: 16,
+          color: passed ? Colors.green : Colors.grey,
+        ),
+        const SizedBox(width: 6),
+        Text(
+          text,
+          style: TextStyle(
+            fontSize: 12,
+            color: passed ? Colors.green : Colors.grey,
+          ),
+        ),
+      ],
+    );
+  }
+
+  @override
+  void dispose() {
+    _emailController.dispose();
+    _passwordController.dispose();
+    _confirmPasswordController.dispose();
+    _nicknameController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Create Account')),
+      body: SingleChildScrollView(
+        padding: EdgeInsets.fromLTRB(
+            24, 24, 24, MediaQuery.of(context).padding.bottom + 24),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Text(
+              'Join My Nemesis',
+              style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Set up your account to start battling',
+              style: TextStyle(color: Colors.white.withOpacity(0.6)),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 32),
+
+            // Nickname
+            TextField(
+              controller: _nicknameController,
+              decoration: const InputDecoration(
+                labelText: 'Nickname',
+                hintText: 'What should people call you?',
+                prefixIcon: Icon(Icons.person),
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // Email
+            TextField(
+              controller: _emailController,
+              keyboardType: TextInputType.emailAddress,
+              decoration: const InputDecoration(
+                labelText: 'Email',
+                prefixIcon: Icon(Icons.email),
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // Password
+            TextField(
+              controller: _passwordController,
+              obscureText: !_showPassword,
+              onChanged: (_) => setState(() {}),
+              decoration: InputDecoration(
+                labelText: 'Password',
+                prefixIcon: const Icon(Icons.lock),
+                suffixIcon: IconButton(
+                  icon: Icon(_showPassword
+                      ? Icons.visibility_off
+                      : Icons.visibility),
+                  onPressed: () =>
+                      setState(() => _showPassword = !_showPassword),
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+
+            // Password rules
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Password must have:',
+                      style: TextStyle(
+                          fontSize: 12, fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 6),
+                    _ruleRow(_hasMinLength, 'At least 8 characters'),
+                    _ruleRow(_hasUppercase, 'One uppercase letter'),
+                    _ruleRow(_hasNumber, 'One number'),
+                    _ruleRow(_hasSymbol, 'One symbol (!@#\$%^&*)'),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // Confirm password
+            TextField(
+              controller: _confirmPasswordController,
+              obscureText: !_showConfirmPassword,
+              onChanged: (_) => setState(() {}),
+              decoration: InputDecoration(
+                labelText: 'Confirm Password',
+                prefixIcon: const Icon(Icons.lock_outline),
+                suffixIcon: IconButton(
+                  icon: Icon(_showConfirmPassword
+                      ? Icons.visibility_off
+                      : Icons.visibility),
+                  onPressed: () => setState(
+                      () => _showConfirmPassword = !_showConfirmPassword),
+                ),
+                errorText: _confirmPasswordController.text.isNotEmpty &&
+                        !_passwordsMatch
+                    ? 'Passwords do not match'
+                    : null,
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // Birthday
+            GestureDetector(
+              onTap: _pickBirthday,
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 16, vertical: 18),
+                decoration: BoxDecoration(
+                  border: Border.all(
+                      color: Colors.white.withOpacity(0.3)),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.cake, size: 20),
+                    const SizedBox(width: 12),
+                    Text(
+                      _birthday == null
+                          ? 'Select your birthday (optional)'
+                          : '${_birthday!.day}/${_birthday!.month}/${_birthday!.year}',
+                      style: TextStyle(
+                        color: _birthday == null
+                            ? Colors.white.withOpacity(0.5)
+                            : Colors.white,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 32),
+
+            // Sign up button
+            if (_isLoading)
+              const Center(child: CircularProgressIndicator())
+            else
+              ElevatedButton(
+                onPressed: _signUp,
+                child: const Text('Create Account'),
+              ),
           ],
         ),
       ),

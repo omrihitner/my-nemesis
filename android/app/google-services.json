@@ -12,7 +12,20 @@
           "package_name": "com.example.my_nemesis"
         }
       },
-      "oauth_client": [],
+      "oauth_client": [
+        {
+          "client_id": "541449642996-fto5s1gin0lvvkf89gnqabn9plnkkj3d.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.my_nemesis",
+            "certificate_hash": "284d59c3f77fce5d4d03abfdfdd5f1193b655976"
+          }
+        },
+        {
+          "client_id": "541449642996-k1uqilt2e4grlmfqp9n8f0gei7j3vdpu.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
       "api_key": [
         {
           "current_key": "AIzaSyDW2fsDVm8wC_9PEZ9aRFlTclcqbnWQEvk"
@@ -20,7 +33,12 @@
       ],
       "services": {
         "appinvite_service": {
-          "other_platform_oauth_client": []
+          "other_platform_oauth_client": [
+            {
+              "client_id": "541449642996-k1uqilt2e4grlmfqp9n8f0gei7j3vdpu.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
         }
       }
     }

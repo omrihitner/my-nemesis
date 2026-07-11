@@ -1,0 +1,3 @@
+The keystore file location: android/app/my-nemesis-key.jks
+Pass - Gnrh.hh......59..!
+The alias: my-nemesis
