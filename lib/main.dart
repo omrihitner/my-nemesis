@@ -11,7 +11,6 @@ import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-
 const supabaseUrl = 'https://pwlidahqnfczjgqikzzy.supabase.co';
 const supabaseAnonKey = 'sb_publishable_xDxJd7g0SvwMtQ9L-1BATQ__ql0v8Ay';
 
@@ -171,33 +170,13 @@ class _LoginPageState extends State<LoginPage> {
   bool isLoading = false;
   bool _showPassword = false;
 
-  late VideoPlayerController _logoController;
-
   @override
   void initState() {
     super.initState();
-
-    _logoController = VideoPlayerController.asset('assets/video/splash.mp4');
-    _logoController.initialize().then((_) {
-      if (!mounted) return;
-      setState(() {});
-      _logoController.play();
-    });
-
-    _logoController.addListener(() {
-      final isFinished = !_logoController.value.isPlaying &&
-          _logoController.value.position >= _logoController.value.duration &&
-          _logoController.value.duration > Duration.zero;
-      if (isFinished) {
-        _logoController.pause();
-        _logoController.seekTo(_logoController.value.duration);
-      }
-    });
   }
 
   @override
   void dispose() {
-    _logoController.dispose();
     super.dispose();
   }
 
@@ -318,13 +297,10 @@ class _LoginPageState extends State<LoginPage> {
           child: ListView(
             shrinkWrap: true,
             children: [
-              _logoController.value.isInitialized
-                  ? SizedBox(
-                      height: 280,
-                      width: 280 * _logoController.value.aspectRatio,
-                      child: VideoPlayer(_logoController),
-                    )
-                  : const SizedBox(height: 280),
+              Image.asset(
+                'assets/icon/app_icon.png',
+                height: 180,
+              ),
               const SizedBox(height: 40),
               TextField(
                 controller: emailController,
@@ -3439,14 +3415,18 @@ class _SplashScreenState extends State<SplashScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: const Color(0xFF0A0A0A),
-      body: Center(
-        child: _controller.value.isInitialized
-            ? AspectRatio(
-                aspectRatio: _controller.value.aspectRatio,
-                child: VideoPlayer(_controller),
-              )
-            : const SizedBox.shrink(),
-      ),
+body: _controller.value.isInitialized
+          ? SizedBox.expand(
+              child: FittedBox(
+                fit: BoxFit.contain,
+                child: SizedBox(
+                  width: _controller.value.size.width,
+                  height: _controller.value.size.height,
+                  child: VideoPlayer(_controller),
+                ),
+              ),
+            )
+          : const SizedBox.shrink(),
     );
   }
 }
