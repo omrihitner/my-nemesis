@@ -1,4 +1,4 @@
-package com.example.my_nemesis
+package my.nemesis
 
 import io.flutter.embedding.android.FlutterActivity
 

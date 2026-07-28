@@ -10,6 +10,7 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:google_sign_in/google_sign_in.dart';
 
 const supabaseUrl = 'https://pwlidahqnfczjgqikzzy.supabase.co';
 const supabaseAnonKey = 'sb_publishable_xDxJd7g0SvwMtQ9L-1BATQ__ql0v8Ay';
@@ -239,20 +240,76 @@ class _LoginPageState extends State<LoginPage> {
     setState(() => isLoading = false);
   }
 
+  Future<bool> _needsNickname(String userId) async {
+       try {
+         final profile = await Supabase.instance.client
+             .from('users')
+             .select('username, display_name')
+             .eq('id', userId)
+             .maybeSingle();
+
+         final username = profile?['username'] as String?;
+         final displayName = profile?['display_name'] as String?;
+
+         final effectiveName = (displayName?.isNotEmpty == true)
+             ? displayName
+             : username;
+
+         if (effectiveName == null || effectiveName.isEmpty) return true;
+         if (effectiveName.contains('@')) return true;
+         return false;
+       } catch (e) {
+         return false;
+       }
+     }
   Future<void> _signInWithGoogle() async {
     setState(() => isLoading = true);
 
     try {
-      await Supabase.instance.client.auth.signInWithOAuth(
-        OAuthProvider.google,
-        redirectTo: 'io.supabase.mynemesis://login-callback',
+      const webClientId =
+          '541449642996-k1uqilt2e4grlmfqp9n8f0gei7j3vdpu.apps.googleusercontent.com';
+
+      final GoogleSignIn googleSignIn = GoogleSignIn.instance;
+      await googleSignIn.initialize(serverClientId: webClientId);
+
+      final googleUser = await googleSignIn.authenticate();
+
+      final authorization = await googleUser.authorizationClient
+              .authorizationForScopes(['email', 'profile']) ??
+          await googleUser.authorizationClient
+              .authorizeScopes(['email', 'profile']);
+
+      final idToken = googleUser.authentication.idToken;
+      final accessToken = authorization.accessToken;
+
+      if (idToken == null) {
+        throw 'No ID Token found.';
+      }
+
+      await Supabase.instance.client.auth.signInWithIdToken(
+        provider: OAuthProvider.google,
+        idToken: idToken,
+        accessToken: accessToken,
       );
 
+      final currentUser = Supabase.instance.client.auth.currentUser;
+      final needsNickname = currentUser != null
+          ? await _needsNickname(currentUser.id)
+          : false;
+
       if (!mounted) return;
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (_) => const HomePage()),
-      );
+
+      if (needsNickname) {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => const ProfilePage()),
+        );
+      } else {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => const HomePage()),
+        );
+      }
     } catch (e) {
       if (!mounted) return;
       showError('Google Sign In failed. Please try again.');
@@ -658,7 +715,7 @@ class _CreateGroupPageState extends State<CreateGroupPage> {
               controller: groupNameController,
               decoration: const InputDecoration(
                 labelText: 'Group name',
-                hintText: 'Example: Omri vs David',
+                hintText: 'Example: Nemesis vs Me',
               ),
             ),
             const SizedBox(height: 24),
@@ -1291,7 +1348,7 @@ body: RefreshIndicator(
                             final color = palette[index % palette.length];
 
                             String roleIcon = '👤';
-                            if (m['role'] == 'owner') roleIcon = '👑';
+                            if (m['role'] == 'owner') roleIcon = '🗡️';
                             else if (m['role'] == 'player') roleIcon = '⚔️';
                             else if (m['role'] == 'judge') roleIcon = '⚖️';
 
@@ -3717,6 +3774,22 @@ class _ChatPageState extends State<ChatPage> {
   }
 final Map<String, Future<String>> _signedUrlCache = {};
 
+  String _formatMessageTime(String? createdAt) {
+       if (createdAt == null) return '';
+       final dt = DateTime.tryParse(createdAt)?.toLocal();
+       if (dt == null) return '';
+       final now = DateTime.now();
+       final isToday = dt.year == now.year && dt.month == now.month && dt.day == now.day;
+       final hour = dt.hour.toString().padLeft(2, '0');
+       final minute = dt.minute.toString().padLeft(2, '0');
+       final time = '$hour:$minute';
+       if (isToday) {
+         return time;
+       }
+       final day = dt.day.toString().padLeft(2, '0');
+       final month = dt.month.toString().padLeft(2, '0');
+       return '$day/$month $time';
+     }
   Future<String> _getSignedUrl(String path) {
     return _signedUrlCache.putIfAbsent(
       path,
@@ -3928,6 +4001,18 @@ final Map<String, Future<String>> _signedUrlCache = {};
                                         style: const TextStyle(color: Colors.white),
                                       ),
                                     ),
+                                  Padding(
+                                    padding: const EdgeInsets.only(top: 4),
+                                    child: Text(
+                                      _formatMessageTime(msg['created_at']),
+                                      style: TextStyle(
+                                        color: isMe
+                                            ? Colors.white.withOpacity(0.75)
+                                            : Colors.white.withOpacity(0.5),
+                                        fontSize: 10,
+                                      ),
+                                    ),
+                                  ),
                                 ],
                               ),
                             ),
