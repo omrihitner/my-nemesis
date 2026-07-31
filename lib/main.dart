@@ -1742,19 +1742,55 @@ await supabase.from('group_members').insert({
         const SnackBar(content: Text('Joined group')),
       );
 
-      await Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (_) => RulesPage(
-            group: {'id': invite['group_id']},
-            isOwner: false,
-            showContinueButton: true,
-          ),
+      final wantsRules = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('📋 Group Rules'),
+          content: const Text('Want to check out this group\'s rules before you dive in?'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Skip'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('View Rules'),
+            ),
+          ],
         ),
       );
 
       if (!mounted) return;
-      Navigator.pop(context, true);
+
+      if (wantsRules == true) {
+        await Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => RulesPage(
+              group: {'id': invite['group_id']},
+              isOwner: false,
+              showContinueButton: true,
+            ),
+          ),
+        );
+        if (!mounted) return;
+      }
+
+      final joinedGroup = await supabase
+          .from('groups')
+          .select()
+          .eq('id', invite['group_id'])
+          .single();
+
+      if (!mounted) return;
+
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(
+          builder: (_) => GroupDashboardPage(group: joinedGroup),
+        ),
+        result: true,
+      );
     } catch (e) {
       showError(e.toString());
     }
@@ -3588,6 +3624,54 @@ class _RulesPageState extends State<RulesPage> {
     _loadRules();
   }
 
+  // Best-effort icon guess for legacy rule lines that don't have an
+  // explicit 'icon::text' marker, so they don't all default to the same icon.
+  String _guessIcon(String text) {
+    final lower = text.toLowerCase();
+    if (lower.contains('photo') ||
+        lower.contains('camera') ||
+        lower.contains('picture') ||
+        lower.contains('upload') ||
+        lower.contains('submit')) {
+      return '📸';
+    }
+    if (lower.contains('time') ||
+        lower.contains('late') ||
+        lower.contains('deadline') ||
+        lower.contains('midnight') ||
+        lower.contains('hour')) {
+      return '⏰';
+    }
+    if (lower.contains('judge') ||
+        lower.contains('score') ||
+        lower.contains('rating') ||
+        lower.contains('point')) {
+      return '⚖️';
+    }
+    if (lower.contains('chat') || lower.contains('message')) {
+      return '💬';
+    }
+    if (lower.contains('win') ||
+        lower.contains('leaderboard') ||
+        lower.contains('champion') ||
+        lower.contains('trophy')) {
+      return '🏆';
+    }
+    if (lower.contains('no ') ||
+        lower.contains("not allowed") ||
+        lower.contains('banned') ||
+        lower.contains('prohibit') ||
+        lower.contains("don't") ||
+        lower.contains('cannot') ||
+        lower.contains("can't")) {
+      return '🚫';
+    }
+    if (lower.contains('owner') || lower.contains('admin')) {
+      return '👑';
+    }
+    return '❗';
+  }
+
   List<Map<String, String>> _parseRules(String raw) {
     return raw
         .split('\n')
@@ -3596,11 +3680,11 @@ class _RulesPageState extends State<RulesPage> {
         .map((line) {
           final separatorIndex = line.indexOf('::');
           if (separatorIndex == -1) {
-            return {'icon': '❗', 'text': line};
+            return {'icon': _guessIcon(line), 'text': line};
           }
           final icon = line.substring(0, separatorIndex).trim();
           final text = line.substring(separatorIndex + 2).trim();
-          return {'icon': icon.isEmpty ? '❗' : icon, 'text': text};
+          return {'icon': icon.isEmpty ? _guessIcon(text) : icon, 'text': text};
         })
         .toList();
   }
