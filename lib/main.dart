@@ -1742,6 +1742,18 @@ await supabase.from('group_members').insert({
         const SnackBar(content: Text('Joined group')),
       );
 
+      await Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => RulesPage(
+            group: {'id': invite['group_id']},
+            isOwner: false,
+            showContinueButton: true,
+          ),
+        ),
+      );
+
+      if (!mounted) return;
       Navigator.pop(context, true);
     } catch (e) {
       showError(e.toString());
@@ -3546,14 +3558,18 @@ class _ScoreSliderState extends State<_ScoreSlider> {
     );
   }
 }
+const List<String> kRuleIcons = ['📸', '⏰', '⚖️', '🚫', '👑', '💬', '🏆', '❗'];
+
 class RulesPage extends StatefulWidget {
   final dynamic group;
   final bool isOwner;
+  final bool showContinueButton;
 
   const RulesPage({
     super.key,
     required this.group,
     required this.isOwner,
+    this.showContinueButton = false,
   });
 
   @override
@@ -3561,7 +3577,7 @@ class RulesPage extends StatefulWidget {
 }
 
 class _RulesPageState extends State<RulesPage> {
-  final _controller = TextEditingController();
+  List<Map<String, String>> _rules = [];
   bool _loading = true;
   bool _editing = false;
   bool _saving = false;
@@ -3570,6 +3586,27 @@ class _RulesPageState extends State<RulesPage> {
   void initState() {
     super.initState();
     _loadRules();
+  }
+
+  List<Map<String, String>> _parseRules(String raw) {
+    return raw
+        .split('\n')
+        .map((line) => line.trim())
+        .where((line) => line.isNotEmpty)
+        .map((line) {
+          final separatorIndex = line.indexOf('::');
+          if (separatorIndex == -1) {
+            return {'icon': '❗', 'text': line};
+          }
+          final icon = line.substring(0, separatorIndex).trim();
+          final text = line.substring(separatorIndex + 2).trim();
+          return {'icon': icon.isEmpty ? '❗' : icon, 'text': text};
+        })
+        .toList();
+  }
+
+  String _serializeRules() {
+    return _rules.map((r) => '${r['icon']}::${r['text']}').join('\n');
   }
 
   Future<void> _loadRules() async {
@@ -3585,7 +3622,7 @@ class _RulesPageState extends State<RulesPage> {
       if (!mounted) return;
 
       setState(() {
-        _controller.text = group['rules'] ?? '';
+        _rules = _parseRules(group['rules'] ?? '');
         _loading = false;
       });
     } catch (e) {
@@ -3599,13 +3636,14 @@ class _RulesPageState extends State<RulesPage> {
 
   Future<void> _saveRules() async {
     final supabase = Supabase.instance.client;
+    final user = supabase.auth.currentUser;
 
     setState(() => _saving = true);
 
     try {
       final result = await supabase
           .from('groups')
-          .update({'rules': _controller.text})
+          .update({'rules': _serializeRules()})
           .eq('id', widget.group['id'])
           .select();
 
@@ -3622,6 +3660,21 @@ class _RulesPageState extends State<RulesPage> {
           const SnackBar(content: Text('Rules saved')),
         );
         setState(() => _editing = false);
+
+        if (user != null) {
+          final profile = await supabase
+              .from('users')
+              .select()
+              .eq('id', user.id)
+              .single();
+
+          await sendNotification(
+            type: 'rules',
+            groupId: widget.group['id'],
+            senderId: user.id,
+            senderName: profile['username'] ?? 'The owner',
+          );
+        }
       }
     } catch (e) {
       if (!mounted) return;
@@ -3634,10 +3687,78 @@ class _RulesPageState extends State<RulesPage> {
     setState(() => _saving = false);
   }
 
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
+  Future<void> _showRuleDialog({int? editIndex}) async {
+    final isNew = editIndex == null;
+    String selectedIcon = isNew ? kRuleIcons.first : _rules[editIndex]['icon']!;
+    final textController = TextEditingController(
+      text: isNew ? '' : _rules[editIndex]['text'],
+    );
+
+    final result = await showDialog<Map<String, String>>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setDialogState) => AlertDialog(
+          title: Text(isNew ? 'Add Rule' : 'Edit Rule'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: kRuleIcons.map((icon) {
+                  final selected = icon == selectedIcon;
+                  return ChoiceChip(
+                    label: Text(icon, style: const TextStyle(fontSize: 18)),
+                    selected: selected,
+                    onSelected: (_) => setDialogState(() => selectedIcon = icon),
+                  );
+                }).toList(),
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: textController,
+                maxLines: 3,
+                minLines: 1,
+                decoration: const InputDecoration(
+                  hintText: 'Rule text...',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                if (textController.text.trim().isEmpty) return;
+                Navigator.pop(dialogContext, {
+                  'icon': selectedIcon,
+                  'text': textController.text.trim(),
+                });
+              },
+              child: Text(isNew ? 'Add' : 'Save'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (result == null || !mounted) return;
+
+    setState(() {
+      if (isNew) {
+        _rules.add(result);
+      } else {
+        _rules[editIndex] = result;
+      }
+    });
+  }
+
+  void _deleteRule(int index) {
+    setState(() => _rules.removeAt(index));
   }
 
   @override
@@ -3655,42 +3776,65 @@ class _RulesPageState extends State<RulesPage> {
             ),
         ],
       ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : Padding(
-              padding: const EdgeInsets.all(20),
-              child: _editing
-                  ? Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        Expanded(
-                          child: TextField(
-                            controller: _controller,
-                            maxLines: null,
-                            expands: true,
-                            textAlignVertical: TextAlignVertical.top,
-                            decoration: const InputDecoration(
-                              hintText: 'Write the group rules here...',
-                              border: OutlineInputBorder(),
+      body: Column(
+        children: [
+          Expanded(
+            child: _loading
+                ? const Center(child: CircularProgressIndicator())
+                : _rules.isEmpty && !_editing
+                    ? const Center(child: Text('No rules have been added yet.'))
+                    : ListView(
+                        padding: const EdgeInsets.all(16),
+                        children: [
+                          for (var i = 0; i < _rules.length; i++)
+                            Card(
+                              child: ListTile(
+                                leading: Text(
+                                  _rules[i]['icon']!,
+                                  style: const TextStyle(fontSize: 22),
+                                ),
+                                title: Text(_rules[i]['text']!),
+                                onTap: _editing ? () => _showRuleDialog(editIndex: i) : null,
+                                trailing: _editing
+                                    ? IconButton(
+                                        icon: const Icon(Icons.close, color: Colors.redAccent),
+                                        onPressed: () => _deleteRule(i),
+                                      )
+                                    : null,
+                              ),
                             ),
-                          ),
-                        ),
-                        const SizedBox(height: 16),
-                        ElevatedButton(
-                          onPressed: _saving ? null : _saveRules,
-                          child: Text(_saving ? 'Saving...' : 'Save Rules'),
-                        ),
-                      ],
-                    )
-                  : SingleChildScrollView(
-                      child: _controller.text.trim().isEmpty
-                          ? const Text('No rules have been added yet.')
-                          : Text(
-                              _controller.text,
-                              style: const TextStyle(fontSize: 15, height: 1.5),
+                          if (_editing) ...[
+                            const SizedBox(height: 8),
+                            OutlinedButton.icon(
+                              onPressed: () => _showRuleDialog(),
+                              icon: const Icon(Icons.add),
+                              label: const Text('Add Rule'),
                             ),
-                    ),
+                            const SizedBox(height: 16),
+                            ElevatedButton(
+                              onPressed: _saving ? null : _saveRules,
+                              child: Text(_saving ? 'Saving...' : 'Save Rules'),
+                            ),
+                          ],
+                        ],
+                      ),
+          ),
+          if (widget.showContinueButton && !_editing && !_loading)
+            SafeArea(
+              top: false,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                child: SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton(
+                    onPressed: () => Navigator.pop(context),
+                    child: const Text('Got it'),
+                  ),
+                ),
+              ),
             ),
+        ],
+      ),
     );
   }
 }
@@ -4071,6 +4215,7 @@ class _NotificationSettingsPageState extends State<NotificationSettingsPage> {
   bool _notifyChat = true;
   bool _notifyUploads = true;
   bool _notifyJudgeReminder = true;
+  bool _notifyRules = true;
   bool _loading = true;
   bool _saving = false;
 
@@ -4099,6 +4244,7 @@ class _NotificationSettingsPageState extends State<NotificationSettingsPage> {
         _notifyChat = membership['notify_chat'] ?? true;
         _notifyUploads = membership['notify_uploads'] ?? true;
         _notifyJudgeReminder = membership['notify_judge_reminder'] ?? true;
+        _notifyRules = membership['notify_rules'] ?? true;
         _loading = false;
       });
     } catch (e) {
@@ -4116,6 +4262,7 @@ class _NotificationSettingsPageState extends State<NotificationSettingsPage> {
       if (column == 'notify_chat') _notifyChat = value;
       if (column == 'notify_uploads') _notifyUploads = value;
       if (column == 'notify_judge_reminder') _notifyJudgeReminder = value;
+      if (column == 'notify_rules') _notifyRules = value;
       _saving = true;
     });
 
@@ -4185,6 +4332,17 @@ class _NotificationSettingsPageState extends State<NotificationSettingsPage> {
                       onChanged: _saving
                           ? null
                           : (v) => _update('notify_judge_reminder', v),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Card(
+                    child: SwitchListTile(
+                      title: const Text('Rules Updates'),
+                      subtitle: const Text('Alert me when the owner changes the rules'),
+                      value: _notifyRules,
+                      onChanged: _saving
+                          ? null
+                          : (v) => _update('notify_rules', v),
                     ),
                   ),
                 ],
@@ -5286,6 +5444,8 @@ class _SignUpPageState extends State<SignUpPage> {
       if (message.contains('already registered') ||
           message.contains('already exists')) {
         _showError('An account with this email already exists.');
+      } else if (message.contains('rate limit')) {
+        _showError('Too many signup attempts. Please wait a few minutes and try again.');
       } else {
         _showError('Something went wrong. Please try again.');
       }

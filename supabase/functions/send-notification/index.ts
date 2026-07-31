@@ -149,6 +149,10 @@ serve(async (req) => {
         title = "⭐ Your photo was scored!";
         body = `${senderName} has scored your photo.`;
         shouldSend = true;
+      } else if (type === 'rules' && member.notify_rules !== false) {
+        title = "📋 Rules updated";
+        body = `${senderName} updated the group rules.`;
+        shouldSend = true;
       }
 
       if (shouldSend) {
