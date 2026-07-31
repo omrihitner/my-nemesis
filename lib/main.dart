@@ -749,6 +749,7 @@ class GroupDashboardPage extends StatefulWidget {
 
 class _GroupDashboardPageState extends State<GroupDashboardPage> {
   String? _myRole;
+  bool _ownerIsJudge = false;
   bool _uploading = false;
 
   @override
@@ -770,7 +771,10 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
         .maybeSingle();
 
     if (!mounted) return;
-    setState(() => _myRole = membership?['role']);
+    setState(() {
+      _myRole = membership?['role'];
+      _ownerIsJudge = membership?['owner_is_judge'] ?? false;
+    });
   }
 
   Future<List<Map<String, dynamic>>> fetchMembersWithNames() async {
@@ -810,7 +814,8 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
         .eq('group_id', widget.group['id']);
 
     final battleMembers = members
-        .where((m) => m['role'] == 'owner' || m['role'] == 'player')
+        .where((m) => m['role'] == 'player' ||
+            (m['role'] == 'owner' && m['owner_is_judge'] != true))
         .toList();
 
     final userIds = battleMembers.map((m) => m['user_id']).toList();
@@ -1057,8 +1062,8 @@ Future<int> _unreadChatCount() async {
   Widget build(BuildContext context) {
     final groupName = widget.group['name'] ?? 'Unnamed Group';
     final isOwner = _myRole == 'owner';
-    final canUpload = _myRole == 'owner' || _myRole == 'player';
-    final canJudge = _myRole == 'judge';
+    final canUpload = isOwner ? !_ownerIsJudge : _myRole == 'player';
+    final canJudge = isOwner ? _ownerIsJudge : _myRole == 'judge';
 
     return Scaffold(
       appBar: AppBar(
@@ -1109,10 +1114,8 @@ Future<int> _unreadChatCount() async {
           PopupMenuButton<String>(
             icon: const Icon(Icons.more_vert),
             onSelected: (value) {
-              if (value == 'player_invite') {
+              if (value == 'invite') {
                 _generateInvite('player');
-              } else if (value == 'judge_invite') {
-                _generateInvite('judge');
               } else if (value == 'settings') {
                 Navigator.push(
                   context,
@@ -1172,12 +1175,8 @@ Future<int> _unreadChatCount() async {
                   child: Text('Manage Members'),
                 ),
                 const PopupMenuItem(
-                  value: 'player_invite',
-                  child: Text('Generate Player Invite'),
-                ),
-                const PopupMenuItem(
-                  value: 'judge_invite',
-                  child: Text('Generate Judge Invite'),
+                  value: 'invite',
+                  child: Text('Invite'),
                 ),
                 const PopupMenuItem(
                   value: 'settings',
@@ -2177,11 +2176,15 @@ final submissions = await supabase
         .eq('group_id', group['id'])
         .inFilter('role', ['owner', 'player']);
 
+    final competingMembers = members
+        .where((m) => m['role'] == 'player' || m['owner_is_judge'] != true)
+        .toList();
+
     final users = await supabase.from('users').select();
 
     final results = <Map<String, dynamic>>[];
 
-    for (final member in members) {
+    for (final member in competingMembers) {
       final userId = member['user_id'];
 
       final user = users.firstWhere(
@@ -2846,7 +2849,11 @@ DateTime _focusedDay = DateTime.now();
           .eq('group_id', widget.group['id'])
           .inFilter('role', ['owner', 'player']);
 
-      final sortedMembers = [...members]
+      final competingMembers = members
+          .where((m) => m['role'] == 'player' || m['owner_is_judge'] != true)
+          .toList();
+
+      final sortedMembers = [...competingMembers]
         ..sort((a, b) => (a['user_id'] as String).compareTo(b['user_id'] as String));
 
       for (var i = 0; i < sortedMembers.length; i++) {
@@ -4232,6 +4239,7 @@ class _ManageMembersPageState extends State<ManageMembersPage> {
         'username': user['username'],
         'role': m['role'],
         'warnings': m['warnings'] ?? 0,
+        'owner_is_judge': m['owner_is_judge'] ?? false,
       };
     }).toList();
 
@@ -4342,8 +4350,66 @@ Future<void> _issueWarning(Map<String, dynamic> member) async {
       );
     }
   }
+  Future<void> _changeRole(Map<String, dynamic> member, String newRole) async {
+    if (member['role'] == newRole) return;
+
+    try {
+      final result = await supabase
+          .from('group_members')
+          .update({'role': newRole})
+          .eq('id', member['id'])
+          .select();
+
+      if (!mounted) return;
+
+      if (result.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Role change blocked by database permissions')),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('${member['username']} is now a $newRole')),
+        );
+        _loadMembers();
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error changing role: $e')),
+      );
+    }
+  }
+
+  Future<void> _toggleOwnerIsJudge(Map<String, dynamic> member, bool newValue) async {
+    try {
+      final result = await supabase
+          .from('group_members')
+          .update({'owner_is_judge': newValue})
+          .eq('id', member['id'])
+          .select();
+
+      if (!mounted) return;
+
+      if (result.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Change blocked by database permissions')),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(newValue ? 'You are now judging' : 'You are now playing')),
+        );
+        _loadMembers();
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error changing mode: $e')),
+      );
+    }
+  }
+
   String _roleIcon(String role) {
-    if (role == 'owner') return '👑';
+    if (role == 'owner') return '🗡️';
     if (role == 'player') return '⚔️';
     if (role == 'judge') return '⚖️';
     return '👤';
@@ -4373,15 +4439,28 @@ Future<void> _issueWarning(Map<String, dynamic> member) async {
                     ),
                     title: Text(member['username'] ?? 'Unknown'),
                     subtitle: Text(
-                      isJudge && warnings > 0
-                          ? '${member['role']} • ⚠️ $warnings warning(s)'
-                          : member['role'],
+                      isOwnerRow
+                          ? 'owner • ${member['owner_is_judge'] == true ? 'judging' : 'playing'}'
+                          : (isJudge && warnings > 0
+                              ? '${member['role']} • ⚠️ $warnings warning(s)'
+                              : member['role']),
                     ),
                     trailing: isOwnerRow
-                        ? null
+                        ? Switch(
+                            value: member['owner_is_judge'] == true,
+                            onChanged: (value) => _toggleOwnerIsJudge(member, value),
+                          )
                         : Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
+                              IconButton(
+                                icon: const Icon(Icons.swap_horiz, color: Colors.white70),
+                                tooltip: isJudge ? 'Make Player' : 'Make Judge',
+                                onPressed: () => _changeRole(
+                                  member,
+                                  isJudge ? 'player' : 'judge',
+                                ),
+                              ),
                               if (isJudge)
                                 IconButton(
                                   icon: const Icon(Icons.warning_amber, color: Colors.amber),
