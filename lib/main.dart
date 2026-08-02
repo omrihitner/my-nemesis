@@ -458,6 +458,59 @@ class _LoginPageState extends State<LoginPage> {
   }
 }
 
+Future<Map<String, dynamic>?> fetchGroupLeader(String groupId) async {
+  final supabase = Supabase.instance.client;
+
+  final submissions = await supabase.from('submissions').select().eq('group_id', groupId);
+  final scores = await supabase.from('scores').select();
+
+  final totals = <String, int>{};
+  for (final submission in submissions) {
+    final userId = submission['user_id'];
+    final submissionScores = scores.where((s) => s['submission_id'] == submission['id']);
+    for (final score in submissionScores) {
+      totals[userId] = (totals[userId] ?? 0) + ((score['score'] ?? 0) as int);
+    }
+  }
+
+  if (totals.isEmpty) return null;
+
+  final leaderId = totals.entries.reduce((a, b) => a.value >= b.value ? a : b).key;
+  final leaderScore = totals[leaderId] ?? 0;
+
+  final users = await supabase.from('users').select().eq('id', leaderId);
+  final leaderName = users.isNotEmpty ? users.first['username'] : 'Unknown';
+
+  return {'name': leaderName, 'score': leaderScore};
+}
+
+Future<int> fetchGroupUnreadCount(String groupId) async {
+  final supabase = Supabase.instance.client;
+  final user = supabase.auth.currentUser;
+  if (user == null) return 0;
+
+  final membership = await supabase
+      .from('group_members')
+      .select()
+      .eq('group_id', groupId)
+      .eq('user_id', user.id)
+      .maybeSingle();
+
+  if (membership == null) return 0;
+  if (membership['notify_chat'] == false) return 0;
+
+  final lastRead = membership['last_chat_read_at'];
+
+  var query = supabase.from('messages').select().eq('group_id', groupId);
+
+  if (lastRead != null) {
+    query = query.gt('created_at', lastRead);
+  }
+
+  final unread = await query;
+  return unread.length;
+}
+
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
 
@@ -498,6 +551,115 @@ class _HomePageState extends State<HomePage> {
 
   return groups;
 }
+
+  Widget _groupCardChip(String label) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: Colors.black.withOpacity(0.35),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.white24),
+      ),
+      child: Text(
+        label,
+        style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w600),
+      ),
+    );
+  }
+
+  Widget _buildGroupCard(dynamic group) {
+    final backgroundColorHex = group['background_color'] as String?;
+    final backgroundPhotoPath = group['background_photo_url'] as String?;
+    final groupId = group['id'] as String;
+
+    Widget cardContent(String? signedUrl, Map<String, dynamic>? leader, int unread) {
+      final baseColor = backgroundColorHex != null
+          ? hexToColor(backgroundColorHex)
+          : const Color(0xFF1E1E1E);
+
+      return Container(
+        margin: const EdgeInsets.only(bottom: 12),
+        height: 88,
+        clipBehavior: Clip.antiAlias,
+        decoration: BoxDecoration(
+          color: baseColor,
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => GroupDashboardPage(group: group),
+                ),
+              );
+            },
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                if (signedUrl != null) Image.network(signedUrl, fit: BoxFit.cover),
+                if (signedUrl != null)
+                  Container(color: Colors.black.withOpacity(0.45)),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              group['name'] ?? 'Unnamed Group',
+                              style: const TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.white,
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            Wrap(
+                              spacing: 6,
+                              runSpacing: 4,
+                              children: [
+                                if (leader != null)
+                                  _groupCardChip('🏆 ${leader['name']} · ${leader['score']}'),
+                                _groupCardChip(unread > 0 ? '💬 $unread' : '💬 0'),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                      const Icon(Icons.arrow_forward_ios, size: 16, color: Colors.white70),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    return FutureBuilder<List<dynamic>>(
+      future: Future.wait([
+        backgroundPhotoPath != null
+            ? supabase.storage.from('Photos').createSignedUrl(backgroundPhotoPath, 60 * 60)
+            : Future.value(null),
+        fetchGroupLeader(groupId),
+        fetchGroupUnreadCount(groupId),
+      ]),
+      builder: (context, snapshot) {
+        final results = snapshot.data;
+        final signedUrl = results?[0] as String?;
+        final leader = results?[1] as Map<String, dynamic>?;
+        final unread = results?[2] as int? ?? 0;
+        return cardContent(signedUrl, leader, unread);
+      },
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -556,24 +718,7 @@ class _HomePageState extends State<HomePage> {
                               'Create your first group or join one with an invite code.',
                         )
                       else
-                        ...groups.map((group) => Card(
-                              child: ListTile(
-                                title:
-                                    Text(group['name'] ?? 'Unnamed Group'),
-                                subtitle: const Text('Tap to open'),
-                                trailing:
-                                    const Icon(Icons.arrow_forward_ios),
-                                onTap: () {
-                                  Navigator.push(
-                                    context,
-                                    MaterialPageRoute(
-                                      builder: (_) =>
-                                          GroupDashboardPage(group: group),
-                                    ),
-                                  );
-                                },
-                              ),
-                            )),
+                        ...groups.map((group) => _buildGroupCard(group)),
                     ],
                   ),
                 ),
@@ -1049,35 +1194,42 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
         .where((s) => !scoredIds.contains(s['id']))
         .length;
   }
-Future<int> _unreadChatCount() async {
+Future<Map<String, dynamic>> _fetchHeaderData() async {
     final supabase = Supabase.instance.client;
-    final user = supabase.auth.currentUser;
-    if (user == null) return 0;
 
-    final membership = await supabase
-        .from('group_members')
-        .select()
-        .eq('group_id', widget.group['id'])
-        .eq('user_id', user.id)
-        .maybeSingle();
+    final leader = await fetchGroupLeader(widget.group['id']);
+    final unread = await _unreadChatCount();
 
-    if (membership == null) return 0;
-    if (membership['notify_chat'] == false) return 0;
-
-    final lastRead = membership['last_chat_read_at'];
-
-    var query = supabase
-        .from('messages')
-        .select()
-        .eq('group_id', widget.group['id']);
-
-    if (lastRead != null) {
-      query = query.gt('created_at', lastRead);
+    String? backgroundUrl;
+    final photoPath = widget.group['background_photo_url'];
+    if (photoPath != null) {
+      backgroundUrl = await supabase.storage.from('Photos').createSignedUrl(photoPath, 60 * 60);
     }
 
-    final unread = await query;
-    return unread.length;
+    return {
+      'leader': leader,
+      'unread': unread,
+      'backgroundUrl': backgroundUrl,
+    };
   }
+
+  Widget _headerChip(String label) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: Colors.black.withOpacity(0.35),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.white24),
+      ),
+      child: Text(
+        label,
+        style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600),
+      ),
+    );
+  }
+
+Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
+
   Future<void> _generateInvite(String role) async {
     final supabase = Supabase.instance.client;
     final user = supabase.auth.currentUser;
@@ -1188,7 +1340,7 @@ Future<int> _unreadChatCount() async {
                   MaterialPageRoute(
                     builder: (_) => SettingsPage(group: widget.group),
                   ),
-                );
+                ).then((_) => setState(() {}));
            } else if (value == 'rules') {
                 Navigator.push(
                   context,
@@ -1262,15 +1414,77 @@ body: RefreshIndicator(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Text(
-                groupName,
-                style: const TextStyle(
-                  fontSize: 30,
-                  fontWeight: FontWeight.bold,
-                ),
+              FutureBuilder<Map<String, dynamic>>(
+                future: _fetchHeaderData(),
+                builder: (context, snapshot) {
+                  final data = snapshot.data;
+                  final leader = data?['leader'] as Map<String, dynamic>?;
+                  final unread = data?['unread'] as int? ?? 0;
+                  final backgroundUrl = data?['backgroundUrl'] as String?;
+                  final backgroundColorHex = widget.group['background_color'] as String?;
+                  final baseColor = backgroundColorHex != null
+                      ? hexToColor(backgroundColorHex)
+                      : const Color(0xFF1A1A1A);
+
+                  return Container(
+                    height: 160,
+                    width: double.infinity,
+                    clipBehavior: Clip.antiAlias,
+                    decoration: BoxDecoration(
+                      color: baseColor,
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        if (backgroundUrl != null)
+                          Image.network(backgroundUrl, fit: BoxFit.cover),
+                        Container(
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              begin: Alignment.topCenter,
+                              end: Alignment.bottomCenter,
+                              colors: [
+                                Colors.black.withOpacity(0.1),
+                                Colors.black.withOpacity(0.65),
+                              ],
+                            ),
+                          ),
+                        ),
+                        Padding(
+                          padding: const EdgeInsets.all(16),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisAlignment: MainAxisAlignment.end,
+                            children: [
+                              Text(
+                                groupName,
+                                style: const TextStyle(
+                                  fontSize: 26,
+                                  fontWeight: FontWeight.bold,
+                                  color: Colors.white,
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              Wrap(
+                                spacing: 8,
+                                runSpacing: 8,
+                                children: [
+                                  if (leader != null)
+                                    _headerChip('🏆 ${leader['name']} · ${leader['score']} pts'),
+                                  _headerChip(
+                                    unread > 0 ? '💬 $unread unread' : '💬 No new messages',
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                },
               ),
-              const SizedBox(height: 10),
-              const Text('Group Dashboard'),
               const SizedBox(height: 20),
               FutureBuilder<List<String>>(
                 future: _checkNewUploads(),
@@ -1526,13 +1740,10 @@ body: RefreshIndicator(
                   );
                 },
               ),
-              FutureBuilder<List<dynamic>>(
-                future: Supabase.instance.client
-                    .from('submissions')
-                    .select()
-                    .eq('group_id', widget.group['id']),
-                builder: (context, submissionsSnapshot) {
-                  if (!submissionsSnapshot.hasData) {
+              FutureBuilder<Map<String, dynamic>?>(
+                future: fetchGroupLeader(widget.group['id']),
+                builder: (context, snapshot) {
+                  if (snapshot.connectionState == ConnectionState.waiting) {
                     return const Card(
                       child: ListTile(
                         title: Text('Current Leader'),
@@ -1541,82 +1752,31 @@ body: RefreshIndicator(
                     );
                   }
 
-                  final submissions = submissionsSnapshot.data ?? [];
+                  final leader = snapshot.data;
 
-                  return FutureBuilder<List<dynamic>>(
-                    future: Supabase.instance.client.from('scores').select(),
-                    builder: (context, scoresSnapshot) {
-                      if (!scoresSnapshot.hasData) {
-                        return const Card(
-                          child: ListTile(
-                            title: Text('Current Leader'),
-                            subtitle: Text('Loading scores...'),
-                          ),
-                        );
-                      }
+                  if (leader == null) {
+                    return const Card(
+                      child: ListTile(
+                        leading: Text('🏆', style: TextStyle(fontSize: 28)),
+                        title: Text('Current Leader'),
+                        subtitle: Text('No scores yet'),
+                      ),
+                    );
+                  }
 
-                      final scores = scoresSnapshot.data ?? [];
-                      final totals = <String, int>{};
-
-                      for (final submission in submissions) {
-                        final userId = submission['user_id'];
-
-                        final submissionScores = scores.where(
-                          (score) => score['submission_id'] == submission['id'],
-                        );
-
-                        for (final score in submissionScores) {
-                          totals[userId] =
-                              (totals[userId] ?? 0) + ((score['score'] ?? 0) as int);
-                        }
-                      }
-
-                      if (totals.isEmpty) {
-                        return const Card(
-                          child: ListTile(
-                            leading: Text('🏆', style: TextStyle(fontSize: 28)),
-                            title: Text('Current Leader'),
-                            subtitle: Text('No scores yet'),
-                          ),
-                        );
-                      }
-
-                      final leaderId = totals.entries.reduce(
-                        (a, b) => a.value >= b.value ? a : b,
-                      ).key;
-
-                      final leaderScore = totals[leaderId] ?? 0;
-
-                      return FutureBuilder<List<dynamic>>(
-                        future: Supabase.instance.client
-                            .from('users')
-                            .select()
-                            .eq('id', leaderId),
-                        builder: (context, userSnapshot) {
-                          final users = userSnapshot.data ?? [];
-                          final leaderName =
-                              users.isNotEmpty ? users.first['username'] : 'Unknown';
-
-                          return Card(
-                            child: ListTile(
-                              leading: const Text(
-                                '🏆',
-                                style: TextStyle(fontSize: 28),
-                              ),
-                              title: const Text(
-                                '🏆 Current Leader',
-                                style: TextStyle(fontWeight: FontWeight.bold),
-                              ),
-                              subtitle: Text(leaderName),
-                              trailing: Text(
-                                '$leaderScore pts',
-                                style: const TextStyle(fontWeight: FontWeight.bold),
-                              ),
-                            ),
-                          );
-                        },
-                      );
-                    },
+                  return Card(
+                    child: ListTile(
+                      leading: const Text('🏆', style: TextStyle(fontSize: 28)),
+                      title: const Text(
+                        '🏆 Current Leader',
+                        style: TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                      subtitle: Text(leader['name']),
+                      trailing: Text(
+                        '${leader['score']} pts',
+                        style: const TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                    ),
                   );
                 },
               ),
@@ -3726,15 +3886,41 @@ class SettingsPage extends StatefulWidget {
   State<SettingsPage> createState() => _SettingsPageState();
 }
 
+const List<String> kGroupBackgroundColors = [
+  '#0A0A0A', // default black
+  '#1A1A2E', // deep navy
+  '#2D1B1B', // deep maroon
+  '#1B2D1F', // deep forest
+  '#241B2D', // deep purple
+  '#2D2A1B', // deep olive
+];
+
+Color hexToColor(String hex) {
+  final cleaned = hex.replaceFirst('#', '');
+  return Color(int.parse('ff$cleaned', radix: 16));
+}
+
 class _SettingsPageState extends State<SettingsPage> {
   bool _anonymousJudging = false;
   bool _loading = true;
   bool _saving = false;
+  bool _savingName = false;
+  bool _uploadingBackground = false;
+
+  final _nameController = TextEditingController();
+  String? _backgroundColor;
+  String? _backgroundPhotoUrl;
 
   @override
   void initState() {
     super.initState();
     _loadSettings();
+  }
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    super.dispose();
   }
 
   Future<void> _loadSettings() async {
@@ -3751,6 +3937,9 @@ class _SettingsPageState extends State<SettingsPage> {
 
       setState(() {
         _anonymousJudging = group['anonymous_judging'] ?? false;
+        _nameController.text = group['name'] ?? '';
+        _backgroundColor = group['background_color'];
+        _backgroundPhotoUrl = group['background_photo_url'];
         _loading = false;
       });
     } catch (e) {
@@ -3810,6 +3999,147 @@ try {
     setState(() => _saving = false);
   }
 
+  Future<void> _saveGroupName() async {
+    final supabase = Supabase.instance.client;
+    final newName = _nameController.text.trim();
+
+    if (newName.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Group name cannot be empty')),
+      );
+      return;
+    }
+
+    setState(() => _savingName = true);
+
+    try {
+      final result = await supabase
+          .from('groups')
+          .update({'name': newName})
+          .eq('id', widget.group['id'])
+          .select();
+
+      if (!mounted) return;
+
+      if (result.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Save blocked by database permissions')),
+        );
+      } else {
+        widget.group['name'] = newName;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Group name updated')),
+        );
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error updating name: $e')),
+      );
+    }
+
+    if (!mounted) return;
+    setState(() => _savingName = false);
+  }
+
+  Future<void> _setBackgroundColor(String color) async {
+    final supabase = Supabase.instance.client;
+
+    try {
+      await supabase.from('groups').update({
+        'background_color': color,
+        'background_photo_url': null,
+      }).eq('id', widget.group['id']);
+
+      if (!mounted) return;
+
+      setState(() {
+        _backgroundColor = color;
+        _backgroundPhotoUrl = null;
+      });
+      widget.group['background_color'] = color;
+      widget.group['background_photo_url'] = null;
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error updating background: $e')),
+      );
+    }
+  }
+
+  Future<void> _uploadBackgroundPhoto() async {
+    final supabase = Supabase.instance.client;
+    final picker = ImagePicker();
+
+    final image = await picker.pickImage(source: ImageSource.gallery, imageQuality: 85);
+    if (image == null) return;
+
+    setState(() => _uploadingBackground = true);
+
+    try {
+      final file = File(image.path);
+      final path =
+          'group_backgrounds/${widget.group['id']}/${DateTime.now().millisecondsSinceEpoch}.jpg';
+
+      await supabase.storage.from('Photos').upload(
+            path,
+            file,
+            fileOptions: const FileOptions(upsert: true),
+          );
+
+      await supabase.from('groups').update({
+        'background_photo_url': path,
+        'background_color': null,
+      }).eq('id', widget.group['id']);
+
+      if (!mounted) return;
+
+      setState(() {
+        _backgroundPhotoUrl = path;
+        _backgroundColor = null;
+      });
+      widget.group['background_photo_url'] = path;
+      widget.group['background_color'] = null;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Background updated')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error uploading background: $e')),
+      );
+    }
+
+    if (!mounted) return;
+    setState(() => _uploadingBackground = false);
+  }
+
+  Future<void> _resetBackground() async {
+    final supabase = Supabase.instance.client;
+
+    try {
+      await supabase.from('groups').update({
+        'background_color': null,
+        'background_photo_url': null,
+      }).eq('id', widget.group['id']);
+
+      if (!mounted) return;
+
+      setState(() {
+        _backgroundColor = null;
+        _backgroundPhotoUrl = null;
+      });
+      widget.group['background_color'] = null;
+      widget.group['background_photo_url'] = null;
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error resetting background: $e')),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -3818,11 +4148,95 @@ try {
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
-          : Padding(
+          : SingleChildScrollView(
               padding: const EdgeInsets.all(20),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text('Group Name', style: TextStyle(fontWeight: FontWeight.bold)),
+                          const SizedBox(height: 10),
+                          TextField(
+                            controller: _nameController,
+                            decoration: const InputDecoration(border: OutlineInputBorder()),
+                          ),
+                          const SizedBox(height: 10),
+                          SizedBox(
+                            width: double.infinity,
+                            child: ElevatedButton(
+                              onPressed: _savingName ? null : _saveGroupName,
+                              child: Text(_savingName ? 'Saving...' : 'Save Name'),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text('Dashboard Background', style: TextStyle(fontWeight: FontWeight.bold)),
+                          const SizedBox(height: 4),
+                          const Text(
+                            'Pick a color or upload a photo for the dashboard header.',
+                            style: TextStyle(fontSize: 13, color: Colors.white70),
+                          ),
+                          const SizedBox(height: 12),
+                          Wrap(
+                            spacing: 10,
+                            runSpacing: 10,
+                            children: kGroupBackgroundColors.map((hex) {
+                              final isSelected = _backgroundColor == hex && _backgroundPhotoUrl == null;
+                              return GestureDetector(
+                                onTap: () => _setBackgroundColor(hex),
+                                child: Container(
+                                  width: 36,
+                                  height: 36,
+                                  decoration: BoxDecoration(
+                                    color: hexToColor(hex),
+                                    shape: BoxShape.circle,
+                                    border: Border.all(
+                                      color: isSelected ? const Color(0xFFE10600) : Colors.white24,
+                                      width: isSelected ? 3 : 1,
+                                    ),
+                                  ),
+                                ),
+                              );
+                            }).toList(),
+                          ),
+                          const SizedBox(height: 16),
+                          SizedBox(
+                            width: double.infinity,
+                            child: OutlinedButton.icon(
+                              onPressed: _uploadingBackground ? null : _uploadBackgroundPhoto,
+                              icon: const Icon(Icons.photo_library),
+                              label: Text(_uploadingBackground ? 'Uploading...' : 'Upload Photo'),
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+                          SizedBox(
+                            width: double.infinity,
+                            child: TextButton(
+                              onPressed: (_backgroundColor == null && _backgroundPhotoUrl == null)
+                                  ? null
+                                  : _resetBackground,
+                              child: const Text('Reset to Default'),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
                   Card(
                     child: SwitchListTile(
                       title: const Text('Anonymous Judging'),
