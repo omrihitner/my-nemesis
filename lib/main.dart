@@ -655,10 +655,18 @@ class _CreateGroupPageState extends State<CreateGroupPage> {
     setState(() => isLoading = true);
 
     try {
-      await supabase.from('users').upsert({
-        'id': user.id,
-        'username': user.email,
-      });
+      final existingProfile = await supabase
+          .from('users')
+          .select()
+          .eq('id', user.id)
+          .maybeSingle();
+
+      if (existingProfile == null) {
+        await supabase.from('users').upsert({
+          'id': user.id,
+          'username': user.email,
+        });
+      }
 
       final group = await supabase
           .from('groups')
@@ -837,23 +845,81 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
         .gte('submitted_at', startOfDay.toIso8601String())
         .lt('submitted_at', endOfDay.toIso8601String());
 
+    final submissionIds = submissions.map((s) => s['id']).toList();
+
+    final scores = submissionIds.isEmpty
+        ? <Map<String, dynamic>>[]
+        : await supabase
+            .from('scores')
+            .select()
+            .inFilter('submission_id', submissionIds);
+
     return battleMembers.map<Map<String, dynamic>>((member) {
       final user = users.firstWhere(
         (u) => u['id'] == member['user_id'],
         orElse: () => {'username': 'Unknown'},
       );
 
-      final hasSubmitted = submissions.any(
-        (submission) => submission['user_id'] == member['user_id'],
+      final matchingSubmissions = submissions
+          .where((s) => s['user_id'] == member['user_id'])
+          .toList();
+      final hasSubmitted = matchingSubmissions.isNotEmpty;
+      final submissionId = hasSubmitted ? matchingSubmissions.first['id'] : null;
+
+      final submissionScores = submissionId == null
+          ? <Map<String, dynamic>>[]
+          : scores.where((sc) => sc['submission_id'] == submissionId).toList();
+
+      final isDisqualified =
+          submissionScores.any((sc) => sc['disqualified'] == true);
+      final totalScore = submissionScores.fold<int>(
+        0,
+        (sum, sc) => sum + ((sc['score'] ?? 0) as int),
       );
 
       return {
         'username': user['username'],
         'role': member['role'],
         'hasSubmitted': hasSubmitted,
+        'hasScore': submissionScores.isNotEmpty,
+        'isDisqualified': isDisqualified,
+        'totalScore': totalScore,
       };
     }).toList();
   }
+
+  Widget _buildStatusChip(Map<String, dynamic> player) {
+    late final String label;
+    late final Color color;
+
+    if (!player['hasSubmitted']) {
+      label = 'Waiting';
+      color = Colors.white70;
+    } else if (player['isDisqualified'] == true) {
+      label = 'Disqualified';
+      color = Colors.redAccent;
+    } else if (player['hasScore'] == true) {
+      label = '⭐ ${player['totalScore']} pts';
+      color = Colors.greenAccent;
+    } else {
+      label = 'Awaiting Score';
+      color = Colors.amberAccent;
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.15),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color.withOpacity(0.5)),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.w600),
+      ),
+    );
+  }
+
   Future<List<String>> _checkNewUploads() async {
     final supabase = Supabase.instance.client;
     final user = supabase.auth.currentUser;
@@ -1401,19 +1467,61 @@ body: RefreshIndicator(
 
                   final players = snapshot.data ?? [];
 
-                  final statusLines = players.map((player) {
-                    final icon = player['role'] == 'owner' ? '👑' : '👤';
-                    final status =
-                        player['hasSubmitted'] ? '✅ Submitted' : '❌ Waiting';
-
-                    return '$icon ${player['username']} — $status';
-                  }).join('\n');
-
                   return Card(
-                    child: ListTile(
-                      leading: const Icon(Icons.today),
-                      title: const Text('Today’s Battle'),
-                      subtitle: Text(statusLines),
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          const Padding(
+                            padding: EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+                            child: Row(
+                              children: [
+                                Icon(Icons.today),
+                                SizedBox(width: 8),
+                                Text(
+                                  'Today’s Battle',
+                                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                                ),
+                              ],
+                            ),
+                          ),
+                          const Divider(height: 16),
+                          for (final player in players)
+                            Padding(
+                              padding: const EdgeInsets.symmetric(vertical: 4),
+                              child: Row(
+                                children: [
+                                  Text(
+                                    player['role'] == 'owner' ? '🗡️' : '⚔️',
+                                    style: const TextStyle(fontSize: 18),
+                                  ),
+                                  const SizedBox(width: 10),
+                                  Expanded(
+                                    child: Text(
+                                      player['username'] ?? 'Unknown',
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                  _buildStatusChip(player),
+                                ],
+                              ),
+                            ),
+                          const SizedBox(height: 8),
+                          OutlinedButton.icon(
+                            onPressed: () {
+                              Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (_) => TodayPhotosPage(group: widget.group),
+                                ),
+                              );
+                            },
+                            icon: const Icon(Icons.photo_library),
+                            label: const Text('View Today\'s Photos'),
+                          ),
+                        ],
+                      ),
                     ),
                   );
                 },
@@ -1855,6 +1963,42 @@ class JudgePhotosPage extends StatefulWidget {
 }
 
 class _JudgePhotosPageState extends State<JudgePhotosPage> {
+  final _pageController = PageController();
+  int _currentPage = 0;
+  List<Map<String, dynamic>> _submissions = [];
+  bool _loading = true;
+  String? _loadError;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSubmissions();
+  }
+
+  @override
+  void dispose() {
+    _pageController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadSubmissions() async {
+    try {
+      final result = await fetchSubmissions();
+      if (!mounted) return;
+      setState(() {
+        _submissions = result;
+        _loading = false;
+        _loadError = null;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _loadError = e.toString();
+      });
+    }
+  }
+
   Future<List<Map<String, dynamic>>> fetchSubmissions() async {
     final supabase = Supabase.instance.client;
     final judge = supabase.auth.currentUser;
@@ -1952,7 +2096,7 @@ Future<void> saveScore(String submissionId, int score) async {
       senderName: judgeProfile['username'] ?? 'A judge',
     );
 
-    setState(() {});
+    await _loadSubmissions();
   }
 
   @override
@@ -1961,20 +2105,19 @@ Future<void> saveScore(String submissionId, int score) async {
       appBar: AppBar(
         title: const Text('Judge Photos'),
       ),
-      body: FutureBuilder<List<Map<String, dynamic>>>(
-        future: fetchSubmissions(),
-        builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting) {
+      body: Builder(
+        builder: (context) {
+          if (_loading) {
             return const Center(child: CircularProgressIndicator());
           }
 
-          if (snapshot.hasError) {
-            return Center(child: Text('Error: ${snapshot.error}'));
+          if (_loadError != null) {
+            return Center(child: Text('Error: $_loadError'));
           }
 
-          final submissions = snapshot.data ?? [];
+          final submissions = _submissions;
 
-        if (submissions.isEmpty) {
+          if (submissions.isEmpty) {
             return const _EmptyState(
               icon: Icons.photo_camera,
               title: 'No photos yet',
@@ -1982,14 +2125,27 @@ Future<void> saveScore(String submissionId, int score) async {
             );
           }
 
-          return ListView.builder(
-            padding: EdgeInsets.fromLTRB(16, 16, 16, MediaQuery.of(context).padding.bottom + 16),
-            itemCount: submissions.length,
-            itemBuilder: (context, index) {
-              final submission = submissions[index];
-              final myScore = submission['my_score'];
+          return Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                child: Text(
+                  'Photo ${_currentPage + 1} of ${submissions.length}',
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
+              ),
+              Expanded(
+                child: PageView.builder(
+                  controller: _pageController,
+                  itemCount: submissions.length,
+                  onPageChanged: (index) => setState(() => _currentPage = index),
+                  itemBuilder: (context, index) {
+                    final submission = submissions[index];
+                    final myScore = submission['my_score'];
 
-              return Card(
+                    return SingleChildScrollView(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      child: Card(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
@@ -2174,7 +2330,7 @@ if (myScore == 0)
         const SnackBar(content: Text('Photo disqualified')),
       );
 
-      setState(() {});
+      await _loadSubmissions();
     } catch (e) {
       if (!context.mounted) return;
 
@@ -2192,8 +2348,164 @@ if (myScore == 0)
                     ),
                   ],
                 ),
-              );
-            },
+              ),
+                    );
+                  },
+                ),
+              ),
+              if (submissions.length > 1)
+                Padding(
+                  padding: EdgeInsets.only(
+                    bottom: MediaQuery.of(context).padding.bottom + 12,
+                    top: 4,
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: List.generate(submissions.length, (index) {
+                      final isActive = index == _currentPage;
+                      return AnimatedContainer(
+                        duration: const Duration(milliseconds: 200),
+                        margin: const EdgeInsets.symmetric(horizontal: 3),
+                        width: isActive ? 10 : 6,
+                        height: 6,
+                        decoration: BoxDecoration(
+                          color: isActive ? Colors.redAccent : Colors.white30,
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                      );
+                    }),
+                  ),
+                ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+class TodayPhotosPage extends StatelessWidget {
+  final dynamic group;
+
+  const TodayPhotosPage({super.key, required this.group});
+
+  Future<List<Map<String, dynamic>>> fetchTodayPhotos() async {
+    final supabase = Supabase.instance.client;
+
+    final today = DateTime.now();
+    final startOfDay = DateTime(today.year, today.month, today.day);
+    final endOfDay = startOfDay.add(const Duration(days: 1));
+
+    final groupData = await supabase
+        .from('groups')
+        .select()
+        .eq('id', group['id'])
+        .single();
+    final anonymousJudging = groupData['anonymous_judging'] ?? false;
+
+    final submissions = await supabase
+        .from('submissions')
+        .select()
+        .eq('group_id', group['id'])
+        .gte('submitted_at', startOfDay.toIso8601String())
+        .lt('submitted_at', endOfDay.toIso8601String())
+        .order('submitted_at', ascending: false);
+
+    final users = await supabase.from('users').select();
+    final scores = await supabase.from('scores').select();
+
+    final result = <Map<String, dynamic>>[];
+
+    for (final submission in submissions) {
+      final signedUrl = await supabase.storage
+          .from('Photos')
+          .createSignedUrl(submission['photo_url'], 60 * 60);
+
+      final uploader = users.firstWhere(
+        (u) => u['id'] == submission['user_id'],
+        orElse: () => {'username': 'Unknown'},
+      );
+
+      final submissionScores = scores.where(
+        (score) => score['submission_id'] == submission['id'],
+      );
+
+      final judgeDetails = <Map<String, dynamic>>[];
+      int totalScore = 0;
+      bool isDisqualified = false;
+      String? disqualificationReason;
+
+      for (final score in submissionScores) {
+        final judgeUser = users.firstWhere(
+          (u) => u['id'] == score['judge_id'],
+          orElse: () => {'username': 'Unknown Judge'},
+        );
+
+        judgeDetails.add({
+          'judge_name': judgeUser['username'],
+          'score': score['score'],
+          'disqualified': score['disqualified'],
+          'reason': score['reason'],
+        });
+
+        totalScore += (score['score'] ?? 0) as int;
+
+        if (score['disqualified'] == true) {
+          isDisqualified = true;
+          disqualificationReason = score['reason'];
+        }
+      }
+
+      result.add({
+        'signed_url': signedUrl,
+        'username': anonymousJudging ? null : uploader['username'],
+        'total_score': totalScore,
+        'is_disqualified': isDisqualified,
+        'disqualification_reason': disqualificationReason,
+        'judge_details': judgeDetails,
+      });
+    }
+
+    return result;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Today\'s Photos')),
+      body: FutureBuilder<List<Map<String, dynamic>>>(
+        future: fetchTodayPhotos(),
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const Center(child: CircularProgressIndicator());
+          }
+
+          if (snapshot.hasError) {
+            return Center(child: Text('Error: ${snapshot.error}'));
+          }
+
+          final photos = snapshot.data ?? [];
+
+          if (photos.isEmpty) {
+            return const _EmptyState(
+              icon: Icons.photo_camera,
+              title: 'No photos yet',
+              subtitle: 'No one has submitted a photo today.',
+            );
+          }
+
+          return Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '📸 Photos submitted: ${photos.length}',
+                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 12),
+                _PhotoCarousel(photos: photos),
+              ],
+            ),
           );
         },
       ),
@@ -2719,115 +3031,7 @@ return Column(
 
     const SizedBox(height: 12),
 
-...photos.map((photo) {
-  return Padding(
-    padding: const EdgeInsets.only(bottom: 20),
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          '📸 ${photo['username']}',
-          style: const TextStyle(
-            fontSize: 18,
-            fontWeight: FontWeight.bold,
-          ),
-        ),
-        const SizedBox(height: 4),
-
-
-
-        const SizedBox(height: 8),
-
-   GestureDetector(
-          onTap: () {
-            Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (_) => FullScreenPhotoPage(
-                  imageUrl: photo['signed_url'],
-                  username: photo['username'],
-                ),
-              ),
-            );
-          },
-          child: Stack(
-            children: [
-              Image.network(
-                photo['signed_url'],
-                height: 250,
-                width: double.infinity,
-                fit: BoxFit.cover,
-              ),
-              Positioned(
-                bottom: 8,
-                right: 8,
-                child: Container(
-                  padding: const EdgeInsets.all(6),
-                  decoration: BoxDecoration(
-                    color: Colors.black.withOpacity(0.5),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: const Icon(
-                    Icons.fullscreen,
-                    color: Colors.white,
-                    size: 20,
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 8),
-
-if (photo['is_disqualified'] == true) ...[
-  const Text(
-    '🚫 Disqualified',
-    style: TextStyle(
-      fontSize: 16,
-      fontWeight: FontWeight.bold,
-    ),
-  ),
-
-  Text(
-    photo['disqualification_reason'] ?? 'No reason provided',
-    style: const TextStyle(fontSize: 14),
-  ),
-] else
-  Text(
-    '⭐ Total Score: ${photo['total_score']}',
-    style: const TextStyle(
-      fontSize: 16,
-      fontWeight: FontWeight.bold,
-    ),
-  ),
-
-const SizedBox(height: 8),
-
-const Text(
-  'Judge Breakdown',
-  style: TextStyle(
-    fontSize: 16,
-    fontWeight: FontWeight.bold,
-  ),
-),
-
-const SizedBox(height: 4),
-
-...(photo['judge_details'] as List).map((judge) {
-if (judge['disqualified'] == true) {
-  return Text(
-    '⚖️ ${judge['judge_name']}: 🚫 Disqualified — ${judge['reason'] ?? 'No reason'}',
-  );
-}
-
-  return Text(
-    '⚖️ ${judge['judge_name']}: ⭐ ${judge['score']}',
-  );
-}),
-      ],
-    ),
-  );
-}),
+    _PhotoCarousel(photos: photos),
   ],
 );
   },
@@ -2839,6 +3043,170 @@ if (judge['disqualified'] == true) {
     );
   }
 }
+
+class _PhotoCarousel extends StatefulWidget {
+  final List<Map<String, dynamic>> photos;
+
+  const _PhotoCarousel({required this.photos});
+
+  @override
+  State<_PhotoCarousel> createState() => _PhotoCarouselState();
+}
+
+class _PhotoCarouselState extends State<_PhotoCarousel> {
+  final _pageController = PageController();
+  int _currentPage = 0;
+
+  @override
+  void dispose() {
+    _pageController.dispose();
+    super.dispose();
+  }
+
+  Widget _scoreChip(String label, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.15),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color.withOpacity(0.5)),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(color: color, fontWeight: FontWeight.bold, fontSize: 14),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final photos = widget.photos;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          height: 480,
+          child: PageView.builder(
+            controller: _pageController,
+            itemCount: photos.length,
+            onPageChanged: (index) => setState(() => _currentPage = index),
+            itemBuilder: (context, index) {
+              final photo = photos[index];
+              final judgeDetails = photo['judge_details'] as List;
+
+              return Card(
+                margin: const EdgeInsets.symmetric(horizontal: 4),
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: SingleChildScrollView(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          photo['username'] != null
+                              ? '📸 ${photo['username']}'
+                              : '🕶️ Anonymous submission',
+                          style: photo['username'] != null
+                              ? const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)
+                              : const TextStyle(fontSize: 18, fontStyle: FontStyle.italic, color: Colors.grey),
+                        ),
+                        const SizedBox(height: 8),
+                        GestureDetector(
+                          onTap: () {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (_) => FullScreenPhotoPage(
+                                  imageUrl: photo['signed_url'],
+                                  username: photo['username'],
+                                ),
+                              ),
+                            );
+                          },
+                          child: Stack(
+                            children: [
+                              ClipRRect(
+                                borderRadius: BorderRadius.circular(12),
+                                child: Image.network(
+                                  photo['signed_url'],
+                                  height: 240,
+                                  width: double.infinity,
+                                  fit: BoxFit.cover,
+                                ),
+                              ),
+                              Positioned(
+                                bottom: 8,
+                                right: 8,
+                                child: Container(
+                                  padding: const EdgeInsets.all(6),
+                                  decoration: BoxDecoration(
+                                    color: Colors.black.withOpacity(0.5),
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                  child: const Icon(Icons.fullscreen, color: Colors.white, size: 20),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        if (photo['is_disqualified'] == true) ...[
+                          _scoreChip('🚫 Disqualified', Colors.redAccent),
+                          const SizedBox(height: 6),
+                          Text(
+                            photo['disqualification_reason'] ?? 'No reason provided',
+                            style: const TextStyle(fontSize: 14),
+                          ),
+                        ] else
+                          _scoreChip('⭐ Total Score: ${photo['total_score']}', Colors.greenAccent),
+                        const SizedBox(height: 12),
+                        const Text(
+                          'Judge Breakdown',
+                          style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+                        ),
+                        const SizedBox(height: 4),
+                        ...judgeDetails.map((judge) {
+                          final text = judge['disqualified'] == true
+                              ? '⚖️ ${judge['judge_name']}: 🚫 Disqualified — ${judge['reason'] ?? 'No reason'}'
+                              : '⚖️ ${judge['judge_name']}: ⭐ ${judge['score']}';
+                          return Padding(
+                            padding: const EdgeInsets.only(bottom: 2),
+                            child: Text(text),
+                          );
+                        }),
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+        if (photos.length > 1) ...[
+          const SizedBox(height: 12),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: List.generate(photos.length, (index) {
+              final isActive = index == _currentPage;
+              return AnimatedContainer(
+                duration: const Duration(milliseconds: 200),
+                margin: const EdgeInsets.symmetric(horizontal: 3),
+                width: isActive ? 10 : 6,
+                height: 6,
+                decoration: BoxDecoration(
+                  color: isActive ? Colors.redAccent : Colors.white30,
+                  borderRadius: BorderRadius.circular(4),
+                ),
+              );
+            }),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
 class CalendarPage extends StatefulWidget {
   final dynamic group;
 
