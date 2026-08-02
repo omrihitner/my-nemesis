@@ -511,6 +511,50 @@ Future<int> fetchGroupUnreadCount(String groupId) async {
   return unread.length;
 }
 
+Widget buildGroupBottomNav(BuildContext context, dynamic group, int currentIndex) {
+  void navigateTo(int index) {
+    if (index == currentIndex) return;
+
+    late final Widget page;
+    switch (index) {
+      case 0:
+        page = GroupDashboardPage(group: group);
+        break;
+      case 1:
+        page = CalendarPage(group: group);
+        break;
+      case 2:
+        page = ChatPage(group: group);
+        break;
+      case 3:
+        page = LeaderboardPage(group: group);
+        break;
+      default:
+        return;
+    }
+
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(builder: (_) => page),
+    );
+  }
+
+  return BottomNavigationBar(
+    currentIndex: currentIndex,
+    onTap: navigateTo,
+    type: BottomNavigationBarType.fixed,
+    backgroundColor: const Color(0xFF0A0A0A),
+    selectedItemColor: const Color(0xFFE10600),
+    unselectedItemColor: Colors.white54,
+    items: const [
+      BottomNavigationBarItem(icon: Icon(Icons.home), label: 'Home'),
+      BottomNavigationBarItem(icon: Icon(Icons.calendar_month), label: 'Calendar'),
+      BottomNavigationBarItem(icon: Icon(Icons.chat_bubble_outline), label: 'Chat'),
+      BottomNavigationBarItem(icon: Icon(Icons.leaderboard), label: 'Leaderboard'),
+    ],
+  );
+}
+
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
 
@@ -1287,48 +1331,6 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
       appBar: AppBar(
         title: Text(groupName),
         actions: [
-          FutureBuilder<int>(
-            future: _unreadChatCount(),
-            builder: (context, snapshot) {
-              final unread = snapshot.data ?? 0;
-              return Stack(
-                alignment: Alignment.center,
-                children: [
-                  IconButton(
-                    icon: const Icon(Icons.chat_bubble_outline),
-                    onPressed: () {
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (_) => ChatPage(group: widget.group),
-                        ),
-                      ).then((_) => setState(() {}));
-                    },
-                  ),
-                  if (unread > 0)
-                    Positioned(
-                      top: 8,
-                      right: 6,
-                      child: Container(
-                        padding: const EdgeInsets.all(3),
-                        decoration: const BoxDecoration(
-                          color: Color(0xFFE10600),
-                          shape: BoxShape.circle,
-                        ),
-                        child: Text(
-                          '$unread',
-                          style: const TextStyle(
-                            fontSize: 10,
-                            fontWeight: FontWeight.bold,
-                            color: Colors.white,
-                          ),
-                        ),
-                      ),
-                    ),
-                ],
-              );
-            },
-          ),
           PopupMenuButton<String>(
             icon: const Icon(Icons.more_vert),
             onSelected: (value) {
@@ -1899,51 +1901,12 @@ body: RefreshIndicator(
                   label: const Text('Judge Photos'),
                 ),
               ],
-              const SizedBox(height: 12),
-              ElevatedButton.icon(
-                onPressed: () {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (_) => LeaderboardPage(group: widget.group),
-                    ),
-                  );
-                },
-                icon: const Icon(Icons.leaderboard),
-                label: const Text('Leaderboard'),
-              ),
-              const SizedBox(height: 12),
-              ElevatedButton.icon(
-                onPressed: () {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (_) => BattleHistoryPage(group: widget.group),
-                    ),
-                  );
-                },
-                icon: const Icon(Icons.history),
-                label: const Text('Battle History'),
-              ),
-              const SizedBox(height: 12),
-             ElevatedButton.icon(
-                onPressed: () {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (_) => CalendarPage(group: widget.group),
-                    ),
-                  );
-                },
-                icon: const Icon(Icons.calendar_month),
-                label: const Text('Calendar'),
-              ),
-            
             ],
      ),
         ),
       ),
       ),
+      bottomNavigationBar: buildGroupBottomNav(context, widget.group, 0),
     );
   }
 }
@@ -2838,172 +2801,7 @@ return ListView(
 );
         },
       ),
-    );
-  }
-}
-class BattleHistoryPage extends StatelessWidget {
-  final dynamic group;
-
-  const BattleHistoryPage({
-    super.key,
-    required this.group,
-  });
-
-  Future<List<Map<String, dynamic>>> fetchHistory() async {
-    final supabase = Supabase.instance.client;
-
-    final submissions = await supabase
-        .from('submissions')
-        .select()
-        .eq('group_id', group['id'])
-        .order('submitted_at', ascending: false);
-
-    final scores = await supabase.from('scores').select();
-    final users = await supabase.from('users').select();
-
-    final days = <String, Map<String, dynamic>>{};
-
-    for (final submission in submissions) {
-      final submittedAt = submission['submitted_at'];
-      final dateKey = submittedAt.toString().split('T').first;
-      final userId = submission['user_id'];
-
-      days.putIfAbsent(dateKey, () {
-        return {
-          'date': submittedAt,
-          'totals': <String, int>{},
-          'submittedTimes': <String, String>{},
-        };
-      });
-
-      final totals = days[dateKey]!['totals'] as Map<String, int>;
-      final submittedTimes = days[dateKey]!['submittedTimes'] as Map<String, String>;
-      submittedTimes[userId] = submittedAt.toString();
-
-      final submissionScores = scores.where(
-        (score) => score['submission_id'] == submission['id'],
-      );
-
-      for (final score in submissionScores) {
-        totals[userId] = (totals[userId] ?? 0) + ((score['score'] ?? 0) as int);
-      }
-    }
-
-    final history = <Map<String, dynamic>>[];
-
-    for (final day in days.values) {
-      final totals = day['totals'] as Map<String, int>;
-      final submittedTimes = day['submittedTimes'] as Map<String, String>;
-
-      String winnerName = 'No scores yet';
-
-      if (totals.isNotEmpty) {
-        final maxScore = totals.values.reduce((a, b) => a > b ? a : b);
-        final topUserIds = totals.entries
-            .where((e) => e.value == maxScore)
-            .map((e) => e.key)
-            .toList();
-
-        topUserIds.sort(
-          (a, b) => submittedTimes[a]!.compareTo(submittedTimes[b]!),
-        );
-        final winnerId = topUserIds.first;
-
-        final winnerUser = users.firstWhere(
-          (user) => user['id'] == winnerId,
-          orElse: () => {'username': 'Unknown'},
-        );
-
-        winnerName = winnerUser['username'];
-      }
-
-      history.add({
-        'date': day['date'],
-        'dateKey': day['date'].toString().split('T').first,
-        'winner': winnerName,
-      });
-    }
-
-    return history;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Battle History'),
-      ),
-      body: StatefulBuilder(
-        builder: (context, setLocalState) {
-          return RefreshIndicator(
-            onRefresh: () async => setLocalState(() {}),
-            child: FutureBuilder<List<Map<String, dynamic>>>(
-              future: fetchHistory(),
-              builder: (context, snapshot) {
-                if (snapshot.connectionState == ConnectionState.waiting) {
-                  return const Center(child: CircularProgressIndicator());
-                }
-
-                if (snapshot.hasError) {
-                  return Center(child: Text('Error: ${snapshot.error}'));
-                }
-
-                final history = snapshot.data ?? [];
-
-               if (history.isEmpty) {
-                  return const _EmptyState(
-                    icon: Icons.history,
-                    title: 'No battles yet',
-                    subtitle: 'Completed battle days will appear here.',
-                  );
-                }
-
-                return ListView.builder(
-                  padding: EdgeInsets.fromLTRB(16, 16, 16, MediaQuery.of(context).padding.bottom + 16),
-                  itemCount: history.length,
-                  itemBuilder: (context, index) {
-                    final item = history[index];
-
-                    return Card(
-                      child: ListTile(
-                        onTap: () {
-                          Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (_) => BattleDetailsPage(
-                                group: group,
-                                item: item,
-                              ),
-                            ),
-                          );
-                        },
-                        leading: const Text(
-                          '📅',
-                          style: TextStyle(fontSize: 28),
-                        ),
-                        title: Text(
-                          '🏆 ${item['winner']}',
-                          style: const TextStyle(fontWeight: FontWeight.bold),
-                        ),
-                        subtitle: Text(
-                          (() {
-                            final date = DateTime.parse(item['date']);
-                            const months = [
-                              'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-                              'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
-                            ];
-                            return '${date.day} ${months[date.month - 1]} ${date.year}';
-                          })(),
-                        ),
-                      ),
-                    );
-                  },
-                );
-              },
-            ),
-          );
-        },
-      ),
+      bottomNavigationBar: buildGroupBottomNav(context, group, 3),
     );
   }
 }
@@ -3395,6 +3193,7 @@ class _CalendarPageState extends State<CalendarPage> {
 
   bool _loading = true;
   String? _errorMessage;
+  bool _showListView = false;
 
   // userId -> color
   final Map<String, Color> _memberColors = {};
@@ -3777,17 +3576,72 @@ Widget _dayCell(
       child: cell,
     );
   }
+
+  Widget _historyListView() {
+    final items = _dayItems.values.toList()
+      ..sort((a, b) => (b['dateKey'] as String).compareTo(a['dateKey'] as String));
+
+    if (items.isEmpty) {
+      return const _EmptyState(
+        icon: Icons.history,
+        title: 'No battles yet',
+        subtitle: 'Completed battle days will appear here.',
+      );
+    }
+
+    const months = [
+      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+    ];
+
+    return ListView.builder(
+      padding: EdgeInsets.fromLTRB(16, 16, 16, MediaQuery.of(context).padding.bottom + 16),
+      itemCount: items.length,
+      itemBuilder: (context, index) {
+        final item = items[index];
+        final date = DateTime.parse(item['dateKey']);
+        final dateLabel = '${date.day} ${months[date.month - 1]} ${date.year}';
+
+        return Card(
+          child: ListTile(
+            onTap: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => BattleDetailsPage(group: widget.group, item: item),
+                ),
+              );
+            },
+            leading: const Text('📅', style: TextStyle(fontSize: 28)),
+            title: Text(dateLabel),
+            subtitle: Text('Winner: ${item['winner']}'),
+            trailing: const Icon(Icons.arrow_forward_ios, size: 16),
+          ),
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Calendar'),
+        actions: [
+          IconButton(
+            icon: Icon(_showListView ? Icons.calendar_month : Icons.list),
+            tooltip: _showListView ? 'Calendar view' : 'List view',
+            onPressed: () => setState(() => _showListView = !_showListView),
+          ),
+        ],
       ),
      body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _errorMessage != null
               ? Center(child: Text('Error: $_errorMessage'))
-              : SingleChildScrollView(
+              : _showListView
+                  ? _historyListView()
+                  : SingleChildScrollView(
                   padding: EdgeInsets.fromLTRB(16, 16, 16, MediaQuery.of(context).padding.bottom + 32),
                   child: Column(
                     children: [
@@ -3871,6 +3725,7 @@ Widget _dayCell(
                     ],
                   ),
                 ),
+      bottomNavigationBar: buildGroupBottomNav(context, widget.group, 1),
     );
   }
 }
@@ -5066,6 +4921,7 @@ final Map<String, Future<String>> _signedUrlCache = {};
           ),
         ],
       ),
+      bottomNavigationBar: buildGroupBottomNav(context, widget.group, 2),
     );
   }
 }class NotificationSettingsPage extends StatefulWidget {
