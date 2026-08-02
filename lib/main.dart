@@ -511,37 +511,38 @@ Future<int> fetchGroupUnreadCount(String groupId) async {
   return unread.length;
 }
 
-Widget buildGroupBottomNav(BuildContext context, dynamic group, int currentIndex) {
-  void navigateTo(int index) {
-    if (index == currentIndex) return;
-
-    late final Widget page;
-    switch (index) {
-      case 0:
-        page = GroupDashboardPage(group: group);
-        break;
-      case 1:
-        page = CalendarPage(group: group);
-        break;
-      case 2:
-        page = ChatPage(group: group);
-        break;
-      case 3:
-        page = LeaderboardPage(group: group);
-        break;
-      default:
-        return;
-    }
-
-    Navigator.pushReplacement(
-      context,
-      MaterialPageRoute(builder: (_) => page),
-    );
+void navigateToGroupTab(BuildContext context, dynamic group, int index) {
+  late final Widget page;
+  switch (index) {
+    case 0:
+      page = GroupDashboardPage(group: group);
+      break;
+    case 1:
+      page = CalendarPage(group: group);
+      break;
+    case 2:
+      page = ChatPage(group: group);
+      break;
+    case 3:
+      page = LeaderboardPage(group: group);
+      break;
+    default:
+      return;
   }
 
+  Navigator.pushReplacement(
+    context,
+    MaterialPageRoute(builder: (_) => page),
+  );
+}
+
+Widget buildGroupBottomNav(BuildContext context, dynamic group, int currentIndex) {
   return BottomNavigationBar(
     currentIndex: currentIndex,
-    onTap: navigateTo,
+    onTap: (index) {
+      if (index == currentIndex) return;
+      navigateToGroupTab(context, group, index);
+    },
     type: BottomNavigationBarType.fixed,
     backgroundColor: const Color(0xFF0A0A0A),
     selectedItemColor: const Color(0xFFE10600),
@@ -1320,12 +1321,213 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
     );
   }
 
+  Future<void> _uploadPhoto() async {
+    if (_uploading) return;
+    setState(() => _uploading = true);
+    try {
+      final supabase = Supabase.instance.client;
+      final user = supabase.auth.currentUser;
+
+      if (user == null) {
+        throw Exception('User not logged in');
+      }
+
+      final todayStart = DateTime.now();
+      final startOfDay = DateTime(
+        todayStart.year,
+        todayStart.month,
+        todayStart.day,
+      ).toIso8601String();
+
+      final existingSubmission = await supabase
+          .from('submissions')
+          .select()
+          .eq('group_id', widget.group['id'])
+          .eq('user_id', user.id)
+          .gte('submitted_at', startOfDay)
+          .maybeSingle();
+
+      if (existingSubmission != null) {
+        if (!mounted) return;
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('You already submitted today 📸'),
+          ),
+        );
+
+        setState(() => _uploading = false);
+        return;
+      }
+
+      final picker = ImagePicker();
+
+      final image = await picker.pickImage(
+        source: ImageSource.camera,
+      );
+
+      if (image == null) {
+        setState(() => _uploading = false);
+        return;
+      }
+
+      final file = File(image.path);
+
+      final filePath =
+          '${widget.group['id']}/${user.id}/${DateTime.now().millisecondsSinceEpoch}.jpg';
+
+      await supabase.storage.from('Photos').upload(
+            filePath,
+            file,
+          );
+
+      await supabase.from('submissions').insert({
+        'group_id': widget.group['id'],
+        'user_id': user.id,
+        'photo_url': filePath,
+      }).select().single();
+
+      // Notify other group members
+      final userProfile = await supabase
+          .from('users')
+          .select()
+          .eq('id', user.id)
+          .single();
+
+      await sendNotification(
+        type: 'upload',
+        groupId: widget.group['id'],
+        senderId: user.id,
+        senderName: userProfile['username'] ?? 'Someone',
+      );
+
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Photo submitted! ✅'),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Upload error: $e'),
+        ),
+      );
+    }
+    if (mounted) setState(() => _uploading = false);
+  }
+
+  Widget _navBarIcon({
+    required IconData icon,
+    required String label,
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
+    final color = selected ? const Color(0xFFE10600) : Colors.white54;
+    return InkWell(
+      onTap: onTap,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, color: color, size: 24),
+          const SizedBox(height: 3),
+          Text(label, style: TextStyle(color: color, fontSize: selected ? 14 : 12)),
+        ],
+      ),
+    );
+  }
+
+  Widget _homeBottomBar(bool canUpload) {
+    return SafeArea(
+      top: false,
+      child: Container(
+      height: 56,
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      decoration: const BoxDecoration(
+        color: Color(0xFF0A0A0A),
+        border: Border(top: BorderSide(color: Colors.white10)),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+        children: [
+          _navBarIcon(
+            icon: Icons.home,
+            label: 'Home',
+            selected: true,
+            onTap: () {},
+          ),
+          _navBarIcon(
+            icon: Icons.calendar_month,
+            label: 'Calendar',
+            selected: false,
+            onTap: () => navigateToGroupTab(context, widget.group, 1),
+          ),
+          GestureDetector(
+            onTap: canUpload
+                ? _uploadPhoto
+                : () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => JudgePhotosPage(group: widget.group),
+                      ),
+                    );
+                  },
+            child: Container(
+              width: 46,
+              height: 46,
+              decoration: BoxDecoration(
+                color: const Color(0xFFE10600),
+                borderRadius: BorderRadius.circular(14),
+                boxShadow: [
+                  BoxShadow(
+                    color: const Color(0xFFE10600).withOpacity(0.4),
+                    blurRadius: 10,
+                    offset: const Offset(0, 3),
+                  ),
+                ],
+              ),
+              child: _uploading
+                  ? const Center(
+                      child: SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                      ),
+                    )
+                  : Icon(
+                      canUpload ? Icons.camera_alt : Icons.star,
+                      color: Colors.white,
+                      size: 24,
+                    ),
+            ),
+          ),
+          _navBarIcon(
+            icon: Icons.chat_bubble_outline,
+            label: 'Chat',
+            selected: false,
+            onTap: () => navigateToGroupTab(context, widget.group, 2),
+          ),
+          _navBarIcon(
+            icon: Icons.leaderboard,
+            label: 'Leaderboard',
+            selected: false,
+            onTap: () => navigateToGroupTab(context, widget.group, 3),
+          ),
+        ],
+      ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final groupName = widget.group['name'] ?? 'Unnamed Group';
     final isOwner = _myRole == 'owner';
     final canUpload = isOwner ? !_ownerIsJudge : _myRole == 'player';
-    final canJudge = isOwner ? _ownerIsJudge : _myRole == 'judge';
 
     return Scaffold(
       appBar: AppBar(
@@ -1782,131 +1984,12 @@ body: RefreshIndicator(
                   );
                 },
               ),
-              const SizedBox(height: 12),
-              if (canUpload)
-                ElevatedButton.icon(
-                onPressed: () async {
-                    if (_uploading) return;
-                    setState(() => _uploading = true);
-                    try {
-                      final supabase = Supabase.instance.client;
-                      final user = supabase.auth.currentUser;
-
-                      if (user == null) {
-                        throw Exception('User not logged in');
-                      }
-
-                      final todayStart = DateTime.now();
-                      final startOfDay = DateTime(
-                        todayStart.year,
-                        todayStart.month,
-                        todayStart.day,
-                      ).toIso8601String();
-
-                      final existingSubmission = await supabase
-                          .from('submissions')
-                          .select()
-                          .eq('group_id', widget.group['id'])
-                          .eq('user_id', user.id)
-                          .gte('submitted_at', startOfDay)
-                          .maybeSingle();
-
-                      if (existingSubmission != null) {
-                        if (!context.mounted) return;
-
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text('You already submitted today 📸'),
-                          ),
-                        );
-
-                        return;
-                      }
-
-                      final picker = ImagePicker();
-
-                      final image = await picker.pickImage(
-                        source: ImageSource.camera,
-                      );
-
-                      if (image == null) return;
-
-                      final file = File(image.path);
-
-                      final filePath =
-                          '${widget.group['id']}/${user.id}/${DateTime.now().millisecondsSinceEpoch}.jpg';
-
-                      await supabase.storage.from('Photos').upload(
-                            filePath,
-                            file,
-                          );
-
-                      final submission = await supabase
-                          .from('submissions')
-                          .insert({
-                            'group_id': widget.group['id'],
-                            'user_id': user.id,
-                            'photo_url': filePath,
-                          })
-                          .select()
-                          .single();
-
-                      // Notify other group members
-                      final userProfile = await supabase
-                          .from('users')
-                          .select()
-                          .eq('id', user.id)
-                          .single();
-
-                      await sendNotification(
-                        type: 'upload',
-                        groupId: widget.group['id'],
-                        senderId: user.id,
-                        senderName: userProfile['username'] ?? 'Someone',
-                      );
-
-                      if (!context.mounted) return;
-
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('Photo submitted! ✅'),
-                        ),
-                      );
-                    } catch (e) {
-                      if (!context.mounted) return;
-
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text('Upload error: $e'),
-                        ),
-                      );
-                    }
-                    if (mounted) setState(() => _uploading = false);
-                  },
-                  icon: const Icon(Icons.camera_alt),
-                  label: const Text('Upload Today’s Photo'),
-                ),
-              if (canJudge) ...[
-                const SizedBox(height: 12),
-                ElevatedButton.icon(
-                  onPressed: () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => JudgePhotosPage(group: widget.group),
-                      ),
-                    );
-                  },
-                  icon: const Icon(Icons.star),
-                  label: const Text('Judge Photos'),
-                ),
-              ],
             ],
      ),
         ),
       ),
       ),
-      bottomNavigationBar: buildGroupBottomNav(context, widget.group, 0),
+      bottomNavigationBar: _homeBottomBar(canUpload),
     );
   }
 }
