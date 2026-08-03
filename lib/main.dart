@@ -948,6 +948,7 @@ class GroupDashboardPage extends StatefulWidget {
 class _GroupDashboardPageState extends State<GroupDashboardPage> {
   String? _myRole;
   bool _ownerIsJudge = false;
+  bool _judgeAlsoPlays = false;
   bool _uploading = false;
 
   @override
@@ -972,7 +973,64 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
     setState(() {
       _myRole = membership?['role'];
       _ownerIsJudge = membership?['owner_is_judge'] ?? false;
+      _judgeAlsoPlays = membership?['judge_also_plays'] ?? false;
     });
+  }
+
+  Future<int> _pendingJudgingCount() async {
+    final supabase = Supabase.instance.client;
+    final user = supabase.auth.currentUser;
+    if (user == null) return 0;
+
+    final today = DateTime.now();
+    final startOfDay = DateTime(today.year, today.month, today.day);
+    final endOfDay = startOfDay.add(const Duration(days: 1));
+
+    final submissions = await supabase
+        .from('submissions')
+        .select()
+        .eq('group_id', widget.group['id'])
+        .neq('user_id', user.id)
+        .gte('submitted_at', startOfDay.toIso8601String())
+        .lt('submitted_at', endOfDay.toIso8601String());
+
+    if (submissions.isEmpty) return 0;
+
+    final submissionIds = submissions.map((s) => s['id']).toList();
+
+    final myScores = await supabase
+        .from('scores')
+        .select()
+        .inFilter('submission_id', submissionIds)
+        .eq('judge_id', user.id);
+
+    final scoredIds = myScores.map((s) => s['submission_id']).toSet();
+
+    return submissions.where((s) => !scoredIds.contains(s['id'])).length;
+  }
+
+  Future<bool> _hybridJudgeCanUploadNow() async {
+    final supabase = Supabase.instance.client;
+    final user = supabase.auth.currentUser;
+    if (user == null) return false;
+
+    final today = DateTime.now();
+    final startOfDay = DateTime(today.year, today.month, today.day).toIso8601String();
+
+    final existingSubmission = await supabase
+        .from('submissions')
+        .select()
+        .eq('group_id', widget.group['id'])
+        .eq('user_id', user.id)
+        .gte('submitted_at', startOfDay)
+        .maybeSingle();
+
+    // Already submitted today: nothing left to upload, so keep showing the
+    // judge icon instead of a camera that would just say "already submitted."
+    if (existingSubmission != null) return false;
+
+    final pending = await _pendingJudgingCount();
+    return pending == 0;
   }
 
   Future<List<Map<String, dynamic>>> fetchMembersWithNames() async {
@@ -1013,7 +1071,8 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
 
     final battleMembers = members
         .where((m) => m['role'] == 'player' ||
-            (m['role'] == 'owner' && m['owner_is_judge'] != true))
+            (m['role'] == 'owner' && (m['owner_is_judge'] != true || m['judge_also_plays'] == true)) ||
+            (m['role'] == 'judge' && m['judge_also_plays'] == true))
         .toList();
 
     final userIds = battleMembers.map((m) => m['user_id']).toList();
@@ -1209,7 +1268,9 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
         .maybeSingle();
 
     if (membership == null) return 0;
-    if (membership['role'] != 'judge') return 0;
+    final isJudging = membership['role'] == 'judge' ||
+        (membership['role'] == 'owner' && membership['owner_is_judge'] == true);
+    if (!isJudging) return 0;
     if (membership['notify_judge_reminder'] == false) return 0;
 
     final today = DateTime.now();
@@ -1220,6 +1281,7 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
         .from('submissions')
         .select()
         .eq('group_id', widget.group['id'])
+        .neq('user_id', user.id)
         .gte('submitted_at', startOfDay.toIso8601String())
         .lt('submitted_at', endOfDay.toIso8601String());
 
@@ -1324,7 +1386,28 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
   Future<void> _uploadPhoto() async {
     if (_uploading) return;
     setState(() => _uploading = true);
+
     try {
+      final isJudging = _myRole == 'owner' ? _ownerIsJudge : _myRole == 'judge';
+
+      if (isJudging && _judgeAlsoPlays) {
+        final pending = await _pendingJudgingCount();
+        if (pending > 0) {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                pending == 1
+                    ? 'Judge the pending photo before uploading your own.'
+                    : 'Judge the $pending pending photos before uploading your own.',
+              ),
+            ),
+          );
+          setState(() => _uploading = false);
+          return;
+        }
+      }
+
       final supabase = Supabase.instance.client;
       final user = supabase.auth.currentUser;
 
@@ -1440,7 +1523,41 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
     );
   }
 
-  Widget _homeBottomBar(bool canUpload) {
+  Widget _middleActionButton({required bool showCamera, required VoidCallback onTap}) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: 46,
+        height: 46,
+        decoration: BoxDecoration(
+          color: const Color(0xFFE10600),
+          borderRadius: BorderRadius.circular(14),
+          boxShadow: [
+            BoxShadow(
+              color: const Color(0xFFE10600).withOpacity(0.4),
+              blurRadius: 10,
+              offset: const Offset(0, 3),
+            ),
+          ],
+        ),
+        child: _uploading
+            ? const Center(
+                child: SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                ),
+              )
+            : Center(
+                child: showCamera
+                    ? const Icon(Icons.camera_alt, color: Colors.white, size: 24)
+                    : const Text('⚖️', style: TextStyle(fontSize: 22)),
+              ),
+      ),
+    );
+  }
+
+  Widget _homeBottomBar(bool canUpload, bool isHybridJudge) {
     return SafeArea(
       top: false,
       child: Container(
@@ -1465,46 +1582,39 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
             selected: false,
             onTap: () => navigateToGroupTab(context, widget.group, 1),
           ),
-          GestureDetector(
-            onTap: canUpload
-                ? _uploadPhoto
-                : () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => JudgePhotosPage(group: widget.group),
-                      ),
+          isHybridJudge
+              ? FutureBuilder<bool>(
+                  future: _hybridJudgeCanUploadNow(),
+                  builder: (context, snapshot) {
+                    final canUploadNow = snapshot.data ?? false;
+                    return _middleActionButton(
+                      showCamera: canUploadNow,
+                      onTap: canUploadNow
+                          ? _uploadPhoto
+                          : () {
+                              Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (_) => JudgePhotosPage(group: widget.group),
+                                ),
+                              ).then((_) => setState(() {}));
+                            },
                     );
                   },
-            child: Container(
-              width: 46,
-              height: 46,
-              decoration: BoxDecoration(
-                color: const Color(0xFFE10600),
-                borderRadius: BorderRadius.circular(14),
-                boxShadow: [
-                  BoxShadow(
-                    color: const Color(0xFFE10600).withOpacity(0.4),
-                    blurRadius: 10,
-                    offset: const Offset(0, 3),
-                  ),
-                ],
-              ),
-              child: _uploading
-                  ? const Center(
-                      child: SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-                      ),
-                    )
-                  : Icon(
-                      canUpload ? Icons.camera_alt : Icons.star,
-                      color: Colors.white,
-                      size: 24,
-                    ),
-            ),
-          ),
+                )
+              : _middleActionButton(
+                  showCamera: canUpload,
+                  onTap: canUpload
+                      ? _uploadPhoto
+                      : () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => JudgePhotosPage(group: widget.group),
+                            ),
+                          );
+                        },
+                ),
           _navBarIcon(
             icon: Icons.chat_bubble_outline,
             label: 'Chat',
@@ -1527,7 +1637,9 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
   Widget build(BuildContext context) {
     final groupName = widget.group['name'] ?? 'Unnamed Group';
     final isOwner = _myRole == 'owner';
-    final canUpload = isOwner ? !_ownerIsJudge : _myRole == 'player';
+    final isJudging = isOwner ? _ownerIsJudge : _myRole == 'judge';
+    final canUpload = !isJudging || _judgeAlsoPlays;
+    final isHybridJudge = isJudging && _judgeAlsoPlays;
 
     return Scaffold(
       appBar: AppBar(
@@ -1989,7 +2101,7 @@ body: RefreshIndicator(
         ),
       ),
       ),
-      bottomNavigationBar: _homeBottomBar(canUpload),
+      bottomNavigationBar: _homeBottomBar(canUpload, isHybridJudge),
     );
   }
 }
@@ -2227,6 +2339,7 @@ final groupData = await supabase
         .from('submissions')
         .select()
         .eq('group_id', widget.group['id'])
+        .neq('user_id', judge!.id)
         .gte('submitted_at', startOfDay.toIso8601String())
         .lt('submitted_at', endOfDay.toIso8601String())
         .order('submitted_at', ascending: false);
@@ -2740,10 +2853,12 @@ final submissions = await supabase
         .from('group_members')
         .select()
         .eq('group_id', group['id'])
-        .inFilter('role', ['owner', 'player']);
+        .inFilter('role', ['owner', 'player', 'judge']);
 
     final competingMembers = members
-        .where((m) => m['role'] == 'player' || m['owner_is_judge'] != true)
+        .where((m) => m['role'] == 'player' ||
+            (m['role'] == 'owner' && (m['owner_is_judge'] != true || m['judge_also_plays'] == true)) ||
+            (m['role'] == 'judge' && m['judge_also_plays'] == true))
         .toList();
 
     final users = await supabase.from('users').select();
@@ -3305,10 +3420,12 @@ DateTime _focusedDay = DateTime.now();
           .from('group_members')
           .select()
           .eq('group_id', widget.group['id'])
-          .inFilter('role', ['owner', 'player']);
+          .inFilter('role', ['owner', 'player', 'judge']);
 
       final competingMembers = members
-          .where((m) => m['role'] == 'player' || m['owner_is_judge'] != true)
+          .where((m) => m['role'] == 'player' ||
+              (m['role'] == 'owner' && (m['owner_is_judge'] != true || m['judge_also_plays'] == true)) ||
+              (m['role'] == 'judge' && m['judge_also_plays'] == true))
           .toList();
 
       final sortedMembers = [...competingMembers]
@@ -5203,6 +5320,7 @@ class _ManageMembersPageState extends State<ManageMembersPage> {
         'role': m['role'],
         'warnings': m['warnings'] ?? 0,
         'owner_is_judge': m['owner_is_judge'] ?? false,
+        'judge_also_plays': m['judge_also_plays'] ?? false,
       };
     }).toList();
 
@@ -5371,6 +5489,40 @@ Future<void> _issueWarning(Map<String, dynamic> member) async {
     }
   }
 
+  Future<void> _toggleJudgeAlsoPlays(Map<String, dynamic> member, bool newValue) async {
+    try {
+      final result = await supabase
+          .from('group_members')
+          .update({'judge_also_plays': newValue})
+          .eq('id', member['id'])
+          .select();
+
+      if (!mounted) return;
+
+      if (result.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Change blocked by database permissions')),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              newValue
+                  ? '${member['username']} can now also play'
+                  : '${member['username']} is judge-only again',
+            ),
+          ),
+        );
+        _loadMembers();
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error changing mode: $e')),
+      );
+    }
+  }
+
   String _roleIcon(String role) {
     if (role == 'owner') return '🗡️';
     if (role == 'player') return '⚔️';
@@ -5403,15 +5555,40 @@ Future<void> _issueWarning(Map<String, dynamic> member) async {
                     title: Text(member['username'] ?? 'Unknown'),
                     subtitle: Text(
                       isOwnerRow
-                          ? 'owner • ${member['owner_is_judge'] == true ? 'judging' : 'playing'}'
-                          : (isJudge && warnings > 0
-                              ? '${member['role']} • ⚠️ $warnings warning(s)'
+                          ? 'owner • '
+                              '${member['owner_is_judge'] == true ? 'judging' : 'playing'}'
+                              '${member['owner_is_judge'] == true && member['judge_also_plays'] == true ? ' • also plays' : ''}'
+                          : (isJudge
+                              ? '${member['role']}'
+                                  '${member['judge_also_plays'] == true ? ' • also plays' : ''}'
+                                  '${warnings > 0 ? ' • ⚠️ $warnings warning(s)' : ''}'
                               : member['role']),
                     ),
                     trailing: isOwnerRow
-                        ? Switch(
-                            value: member['owner_is_judge'] == true,
-                            onChanged: (value) => _toggleOwnerIsJudge(member, value),
+                        ? Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              if (member['owner_is_judge'] == true)
+                                IconButton(
+                                  icon: Icon(
+                                    Icons.camera_alt,
+                                    color: member['judge_also_plays'] == true
+                                        ? const Color(0xFFE10600)
+                                        : Colors.white38,
+                                  ),
+                                  tooltip: member['judge_also_plays'] == true
+                                      ? 'Also plays (tap to make judge-only)'
+                                      : 'Judge-only (tap to also let them play)',
+                                  onPressed: () => _toggleJudgeAlsoPlays(
+                                    member,
+                                    member['judge_also_plays'] != true,
+                                  ),
+                                ),
+                              Switch(
+                                value: member['owner_is_judge'] == true,
+                                onChanged: (value) => _toggleOwnerIsJudge(member, value),
+                              ),
+                            ],
                           )
                         : Row(
                             mainAxisSize: MainAxisSize.min,
@@ -5424,6 +5601,22 @@ Future<void> _issueWarning(Map<String, dynamic> member) async {
                                   isJudge ? 'player' : 'judge',
                                 ),
                               ),
+                              if (isJudge)
+                                IconButton(
+                                  icon: Icon(
+                                    Icons.camera_alt,
+                                    color: member['judge_also_plays'] == true
+                                        ? const Color(0xFFE10600)
+                                        : Colors.white38,
+                                  ),
+                                  tooltip: member['judge_also_plays'] == true
+                                      ? 'Also plays (tap to make judge-only)'
+                                      : 'Judge-only (tap to let them also play)',
+                                  onPressed: () => _toggleJudgeAlsoPlays(
+                                    member,
+                                    member['judge_also_plays'] != true,
+                                  ),
+                                ),
                               if (isJudge)
                                 IconButton(
                                   icon: const Icon(Icons.warning_amber, color: Colors.amber),
