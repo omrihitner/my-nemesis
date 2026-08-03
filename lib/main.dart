@@ -4340,15 +4340,22 @@ class _SplashScreenState extends State<SplashScreen> {
         _navigated = true;
         final prefs = await SharedPreferences.getInstance();
         final onboardingComplete = prefs.getBool('onboarding_complete') ?? false;
+        final termsAccepted = prefs.getBool('terms_accepted') ?? false;
 
         if (!mounted) return;
+
+        Widget nextPage;
+        if (!onboardingComplete) {
+          nextPage = const OnboardingPage();
+        } else if (!termsAccepted) {
+          nextPage = const OnboardingPage(skipToTerms: true);
+        } else {
+          nextPage = const AuthGate();
+        }
+
         Navigator.pushReplacement(
           context,
-          MaterialPageRoute(
-            builder: (_) => onboardingComplete
-                ? const AuthGate()
-                : const OnboardingPage(),
-          ),
+          MaterialPageRoute(builder: (_) => nextPage),
         );
       }
     });
@@ -6148,15 +6155,41 @@ Future<void> _showDeleteConfirmation() async {
   }
 }
 class OnboardingPage extends StatefulWidget {
-  const OnboardingPage({super.key});
+  final bool skipToTerms;
+
+  const OnboardingPage({super.key, this.skipToTerms = false});
 
   @override
   State<OnboardingPage> createState() => _OnboardingPageState();
 }
 
 class _OnboardingPageState extends State<OnboardingPage> {
-  final PageController _pageController = PageController();
+  late final PageController _pageController;
   int _currentPage = 0;
+  bool _termsAccepted = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _currentPage = widget.skipToTerms ? _pages.length : 0;
+    _pageController = PageController(initialPage: _currentPage);
+  }
+
+  static const String _privacyPolicyUrl =
+      'https://sugared-hellebore-0ba.notion.site/398f6483ef768004b84ffe0c2897d139';
+  static const String _termsOfServiceUrl =
+      'https://sugared-hellebore-0ba.notion.site/Terms-of-Service-for-My-Nemesis-398f6483ef7680568620f5575e03a89f';
+
+  Future<void> _openUrl(String url) async {
+    try {
+      await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Could not open browser. Please try again.')),
+      );
+    }
+  }
 
   final List<Map<String, dynamic>> _pages = [
     {
@@ -6186,8 +6219,11 @@ class _OnboardingPageState extends State<OnboardingPage> {
   ];
 
   Future<void> _finish() async {
+    if (!_termsAccepted) return;
+
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('onboarding_complete', true);
+    await prefs.setBool('terms_accepted', true);
 
     if (!mounted) return;
     Navigator.pushReplacement(
@@ -6213,7 +6249,7 @@ class _OnboardingPageState extends State<OnboardingPage> {
             Align(
               alignment: Alignment.topRight,
               child: TextButton(
-                onPressed: _finish,
+                onPressed: () => _pageController.jumpToPage(_pages.length),
                 child: const Text('Skip'),
               ),
             ),
@@ -6224,8 +6260,89 @@ class _OnboardingPageState extends State<OnboardingPage> {
                 controller: _pageController,
                 onPageChanged: (index) =>
                     setState(() => _currentPage = index),
-                itemCount: _pages.length,
+                itemCount: _pages.length + 1,
                 itemBuilder: (context, index) {
+                  if (index == _pages.length) {
+                    return Padding(
+                      padding: const EdgeInsets.all(32),
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Container(
+                            width: 120,
+                            height: 120,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: Colors.white.withOpacity(0.1),
+                              border: Border.all(color: Colors.white, width: 2),
+                            ),
+                            child: const Icon(Icons.description, size: 56, color: Colors.white),
+                          ),
+                          const SizedBox(height: 40),
+                          const Text(
+                            'Just one more thing',
+                            style: TextStyle(
+                              fontSize: 28,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.white,
+                            ),
+                            textAlign: TextAlign.center,
+                          ),
+                          const SizedBox(height: 16),
+                          Text(
+                            'Please review and accept our policies to continue.',
+                            style: TextStyle(fontSize: 15, color: Colors.white.withOpacity(0.7)),
+                            textAlign: TextAlign.center,
+                          ),
+                          const SizedBox(height: 32),
+                          InkWell(
+                            onTap: () => setState(() => _termsAccepted = !_termsAccepted),
+                            child: Row(
+                              children: [
+                                Checkbox(
+                                  value: _termsAccepted,
+                                  onChanged: (value) =>
+                                      setState(() => _termsAccepted = value ?? false),
+                                ),
+                                Expanded(
+                                  child: Wrap(
+                                    crossAxisAlignment: WrapCrossAlignment.center,
+                                    children: [
+                                      const Text('I agree to the ', style: TextStyle(color: Colors.white)),
+                                      GestureDetector(
+                                        onTap: () => _openUrl(_termsOfServiceUrl),
+                                        child: const Text(
+                                          'Terms of Service',
+                                          style: TextStyle(
+                                            color: Color(0xFFE10600),
+                                            fontWeight: FontWeight.bold,
+                                            decoration: TextDecoration.underline,
+                                          ),
+                                        ),
+                                      ),
+                                      const Text(' and ', style: TextStyle(color: Colors.white)),
+                                      GestureDetector(
+                                        onTap: () => _openUrl(_privacyPolicyUrl),
+                                        child: const Text(
+                                          'Privacy Policy',
+                                          style: TextStyle(
+                                            color: Color(0xFFE10600),
+                                            fontWeight: FontWeight.bold,
+                                            decoration: TextDecoration.underline,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  }
+
                   final page = _pages[index];
                   return Padding(
                     padding: const EdgeInsets.all(32),
@@ -6290,7 +6407,7 @@ class _OnboardingPageState extends State<OnboardingPage> {
             Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: List.generate(
-                _pages.length,
+                _pages.length + 1,
                 (index) => AnimatedContainer(
                   duration: const Duration(milliseconds: 250),
                   margin: const EdgeInsets.symmetric(horizontal: 4),
@@ -6314,18 +6431,20 @@ class _OnboardingPageState extends State<OnboardingPage> {
               child: SizedBox(
                 width: double.infinity,
                 child: ElevatedButton(
-                  onPressed: () {
-                    if (_currentPage < _pages.length - 1) {
-                      _pageController.nextPage(
-                        duration: const Duration(milliseconds: 300),
-                        curve: Curves.easeInOut,
-                      );
-                    } else {
-                      _finish();
-                    }
-                  },
+                  onPressed: _currentPage == _pages.length && !_termsAccepted
+                      ? null
+                      : () {
+                          if (_currentPage < _pages.length) {
+                            _pageController.nextPage(
+                              duration: const Duration(milliseconds: 300),
+                              curve: Curves.easeInOut,
+                            );
+                          } else {
+                            _finish();
+                          }
+                        },
                   child: Text(
-                    _currentPage < _pages.length - 1 ? 'Next' : 'Get Started',
+                    _currentPage < _pages.length ? 'Next' : 'Get Started',
                   ),
                 ),
               ),
