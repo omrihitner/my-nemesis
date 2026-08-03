@@ -11,6 +11,7 @@ import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:google_sign_in/google_sign_in.dart';
+import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 
 const supabaseUrl = 'https://pwlidahqnfczjgqikzzy.supabase.co';
 const supabaseAnonKey = 'sb_publishable_xDxJd7g0SvwMtQ9L-1BATQ__ql0v8Ay';
@@ -371,10 +372,10 @@ class _LoginPageState extends State<LoginPage> {
                 decoration: InputDecoration(
                   labelText: 'Password',
                   suffixIcon: IconButton(
-                    icon: Icon(
+                    icon: FaIcon(
                       _showPassword
-                          ? Icons.visibility_off
-                          : Icons.visibility,
+                          ? FontAwesomeIcons.eyeSlash
+                          : FontAwesomeIcons.eye,
                     ),
                     onPressed: () =>
                         setState(() => _showPassword = !_showPassword),
@@ -548,10 +549,10 @@ Widget buildGroupBottomNav(BuildContext context, dynamic group, int currentIndex
     selectedItemColor: const Color(0xFFE10600),
     unselectedItemColor: Colors.white54,
     items: const [
-      BottomNavigationBarItem(icon: Icon(Icons.home), label: 'Home'),
-      BottomNavigationBarItem(icon: Icon(Icons.calendar_month), label: 'Calendar'),
-      BottomNavigationBarItem(icon: Icon(Icons.chat_bubble_outline), label: 'Chat'),
-      BottomNavigationBarItem(icon: Icon(Icons.leaderboard), label: 'Leaderboard'),
+      BottomNavigationBarItem(icon: FaIcon(FontAwesomeIcons.house), label: 'Home'),
+      BottomNavigationBarItem(icon: FaIcon(FontAwesomeIcons.calendarDays), label: 'Calendar'),
+      BottomNavigationBarItem(icon: FaIcon(FontAwesomeIcons.commentDots), label: 'Chat'),
+      BottomNavigationBarItem(icon: FaIcon(FontAwesomeIcons.trophy), label: 'Leaderboard'),
     ],
   );
 }
@@ -677,7 +678,7 @@ class _HomePageState extends State<HomePage> {
                           ],
                         ),
                       ),
-                      const Icon(Icons.arrow_forward_ios, size: 16, color: Colors.white70),
+                      const FaIcon(FontAwesomeIcons.chevronRight, size: 16, color: Colors.white70),
                     ],
                   ),
                 ),
@@ -721,7 +722,7 @@ class _HomePageState extends State<HomePage> {
                 MaterialPageRoute(builder: (_) => const ProfilePage()),
               );
             },
-            icon: const Icon(Icons.account_circle),
+            icon: const FaIcon(FontAwesomeIcons.userCircle),
           ),
           IconButton(
             onPressed: () async {
@@ -732,7 +733,7 @@ class _HomePageState extends State<HomePage> {
                 MaterialPageRoute(builder: (_) => const LoginPage()),
               );
             },
-            icon: const Icon(Icons.logout),
+            icon: const FaIcon(FontAwesomeIcons.signOut),
           ),
         ],
       ),
@@ -757,7 +758,7 @@ class _HomePageState extends State<HomePage> {
                         Center(child: Text('Error: ${snapshot.error}'))
                       else if (groups.isEmpty)
                         const _EmptyState(
-                          icon: Icons.group_off,
+                          icon: FontAwesomeIcons.usersSlash,
                           title: 'No groups yet',
                           subtitle:
                               'Create your first group or join one with an invite code.',
@@ -1363,7 +1364,7 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
           children: [
             Expanded(child: Text(inviteCode)),
             IconButton(
-              icon: const Icon(Icons.copy, size: 20),
+              icon: const FaIcon(FontAwesomeIcons.copy, size: 20),
               onPressed: () {
                 Clipboard.setData(ClipboardData(text: inviteCode));
                 ScaffoldMessenger.of(context).showSnackBar(
@@ -1504,7 +1505,7 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
   }
 
   Widget _navBarIcon({
-    required IconData icon,
+    required FaIconData icon,
     required String label,
     required bool selected,
     required VoidCallback onTap,
@@ -1515,7 +1516,7 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icon, color: color, size: 24),
+          FaIcon(icon, color: color, size: 24),
           const SizedBox(height: 3),
           Text(label, style: TextStyle(color: color, fontSize: selected ? 14 : 12)),
         ],
@@ -1549,9 +1550,11 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
                 ),
               )
             : Center(
-                child: showCamera
-                    ? const Icon(Icons.camera_alt, color: Colors.white, size: 24)
-                    : const Text('⚖️', style: TextStyle(fontSize: 22)),
+                child: FaIcon(
+                  showCamera ? FontAwesomeIcons.camera : FontAwesomeIcons.scaleBalanced,
+                  color: Colors.white,
+                  size: 24,
+                ),
               ),
       ),
     );
@@ -1571,13 +1574,13 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
         mainAxisAlignment: MainAxisAlignment.spaceEvenly,
         children: [
           _navBarIcon(
-            icon: Icons.home,
+            icon: FontAwesomeIcons.house,
             label: 'Home',
             selected: true,
             onTap: () {},
           ),
           _navBarIcon(
-            icon: Icons.calendar_month,
+            icon: FontAwesomeIcons.calendarDays,
             label: 'Calendar',
             selected: false,
             onTap: () => navigateToGroupTab(context, widget.group, 1),
@@ -1616,13 +1619,13 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
                         },
                 ),
           _navBarIcon(
-            icon: Icons.chat_bubble_outline,
+            icon: FontAwesomeIcons.commentDots,
             label: 'Chat',
             selected: false,
             onTap: () => navigateToGroupTab(context, widget.group, 2),
           ),
           _navBarIcon(
-            icon: Icons.leaderboard,
+            icon: FontAwesomeIcons.trophy,
             label: 'Leaderboard',
             selected: false,
             onTap: () => navigateToGroupTab(context, widget.group, 3),
@@ -1646,7 +1649,7 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
         title: Text(groupName),
         actions: [
           PopupMenuButton<String>(
-            icon: const Icon(Icons.more_vert),
+            icon: const FaIcon(FontAwesomeIcons.ellipsisVertical),
             onSelected: (value) {
               if (value == 'invite') {
                 _generateInvite('player');
@@ -1896,7 +1899,7 @@ body: RefreshIndicator(
                   if (snapshot.connectionState == ConnectionState.waiting) {
                     return const Card(
                       child: ListTile(
-                        leading: Icon(Icons.people),
+                        leading: FaIcon(FontAwesomeIcons.users),
                         title: Text('Members'),
                         subtitle: Text('Loading...'),
                       ),
@@ -1906,7 +1909,7 @@ body: RefreshIndicator(
                   if (snapshot.hasError) {
                     return Card(
                       child: ListTile(
-                        leading: const Icon(Icons.people),
+                        leading: const FaIcon(FontAwesomeIcons.users),
                         title: const Text('Members'),
                         subtitle: Text('Error: ${snapshot.error}'),
                       ),
@@ -1942,11 +1945,6 @@ body: RefreshIndicator(
                             final m = entry.value;
                             final color = palette[index % palette.length];
 
-                            String roleIcon = '👤';
-                            if (m['role'] == 'owner') roleIcon = '🗡️';
-                            else if (m['role'] == 'player') roleIcon = '⚔️';
-                            else if (m['role'] == 'judge') roleIcon = '⚖️';
-
                             return Padding(
                               padding: const EdgeInsets.symmetric(vertical: 4),
                               child: Row(
@@ -1956,9 +1954,11 @@ body: RefreshIndicator(
                                     color: color,
                                   ),
                                   const SizedBox(width: 12),
+                                  FaIcon(roleIconData(m['role']), size: 16, color: Colors.white70),
+                                  const SizedBox(width: 6),
                                   Expanded(
                                     child: Text(
-                                      '$roleIcon ${m['username']}',
+                                      m['username'] ?? 'Unknown',
                                       style: const TextStyle(fontSize: 15),
                                     ),
                                   ),
@@ -1978,7 +1978,7 @@ body: RefreshIndicator(
                   if (snapshot.connectionState == ConnectionState.waiting) {
                     return const Card(
                       child: ListTile(
-                        leading: Icon(Icons.today),
+                        leading: FaIcon(FontAwesomeIcons.calendarCheck),
                         title: Text('Today’s Battle'),
                         subtitle: Text('Loading battle status...'),
                       ),
@@ -1988,7 +1988,7 @@ body: RefreshIndicator(
                   if (snapshot.hasError) {
                     return Card(
                       child: ListTile(
-                        leading: const Icon(Icons.today),
+                        leading: const FaIcon(FontAwesomeIcons.calendarCheck),
                         title: const Text('Today’s Battle'),
                         subtitle: Text('Error: ${snapshot.error}'),
                       ),
@@ -2007,7 +2007,7 @@ body: RefreshIndicator(
                             padding: EdgeInsets.symmetric(horizontal: 4, vertical: 4),
                             child: Row(
                               children: [
-                                Icon(Icons.today),
+                                FaIcon(FontAwesomeIcons.calendarCheck),
                                 SizedBox(width: 8),
                                 Text(
                                   'Today’s Battle',
@@ -2022,10 +2022,7 @@ body: RefreshIndicator(
                               padding: const EdgeInsets.symmetric(vertical: 4),
                               child: Row(
                                 children: [
-                                  Text(
-                                    player['role'] == 'owner' ? '🗡️' : '⚔️',
-                                    style: const TextStyle(fontSize: 18),
-                                  ),
+                                  FaIcon(roleIconData(player['role']), size: 18, color: Colors.white70),
                                   const SizedBox(width: 10),
                                   Expanded(
                                     child: Text(
@@ -2047,7 +2044,7 @@ body: RefreshIndicator(
                                 ),
                               );
                             },
-                            icon: const Icon(Icons.photo_library),
+                            icon: const FaIcon(FontAwesomeIcons.images),
                             label: const Text('View Today\'s Photos'),
                           ),
                         ],
@@ -2438,7 +2435,7 @@ Future<void> saveScore(String submissionId, int score) async {
 
           if (submissions.isEmpty) {
             return const _EmptyState(
-              icon: Icons.photo_camera,
+              icon: FontAwesomeIcons.camera,
               title: 'No photos yet',
               subtitle: 'Players haven\'t submitted their photos today.',
             );
@@ -2496,8 +2493,8 @@ Future<void> saveScore(String submissionId, int score) async {
                                 color: Colors.black.withOpacity(0.5),
                                 borderRadius: BorderRadius.circular(8),
                               ),
-                              child: const Icon(
-                                Icons.fullscreen,
+                              child: const FaIcon(
+                                FontAwesomeIcons.expand,
                                 color: Colors.white,
                                 size: 20,
                               ),
@@ -2658,7 +2655,7 @@ if (myScore == 0)
       );
     }
   },
-  icon: const Icon(Icons.block),
+  icon: const FaIcon(FontAwesomeIcons.ban),
   label: const Text('Disqualify Photo'),
 ),
 
@@ -2806,7 +2803,7 @@ class TodayPhotosPage extends StatelessWidget {
 
           if (photos.isEmpty) {
             return const _EmptyState(
-              icon: Icons.photo_camera,
+              icon: FontAwesomeIcons.camera,
               title: 'No photos yet',
               subtitle: 'No one has submitted a photo today.',
             );
@@ -2924,7 +2921,7 @@ final submissions = await supabase
 
         if (results.isEmpty) {
             return const _EmptyState(
-              icon: Icons.leaderboard,
+              icon: FontAwesomeIcons.trophy,
               title: 'No scores yet',
               subtitle: 'Scores will appear here once photos are judged.',
             );
@@ -3300,7 +3297,7 @@ class _PhotoCarouselState extends State<_PhotoCarousel> {
                                     color: Colors.black.withOpacity(0.5),
                                     borderRadius: BorderRadius.circular(8),
                                   ),
-                                  child: const Icon(Icons.fullscreen, color: Colors.white, size: 20),
+                                  child: const FaIcon(FontAwesomeIcons.expand, color: Colors.white, size: 20),
                                 ),
                               ),
                             ],
@@ -3783,7 +3780,7 @@ Widget _dayCell(
 
     if (items.isEmpty) {
       return const _EmptyState(
-        icon: Icons.history,
+        icon: FontAwesomeIcons.clockRotateLeft,
         title: 'No battles yet',
         subtitle: 'Completed battle days will appear here.',
       );
@@ -3815,7 +3812,7 @@ Widget _dayCell(
             leading: const Text('📅', style: TextStyle(fontSize: 28)),
             title: Text(dateLabel),
             subtitle: Text('Winner: ${item['winner']}'),
-            trailing: const Icon(Icons.arrow_forward_ios, size: 16),
+            trailing: const FaIcon(FontAwesomeIcons.chevronRight, size: 16),
           ),
         );
       },
@@ -3829,7 +3826,7 @@ Widget _dayCell(
         title: const Text('Calendar'),
         actions: [
           IconButton(
-            icon: Icon(_showListView ? Icons.calendar_month : Icons.list),
+            icon: FaIcon(_showListView ? FontAwesomeIcons.calendarDays : FontAwesomeIcons.list),
             tooltip: _showListView ? 'Calendar view' : 'List view',
             onPressed: () => setState(() => _showListView = !_showListView),
           ),
@@ -3953,6 +3950,13 @@ const List<String> kGroupBackgroundColors = [
 Color hexToColor(String hex) {
   final cleaned = hex.replaceFirst('#', '');
   return Color(int.parse('ff$cleaned', radix: 16));
+}
+
+FaIconData roleIconData(String? role) {
+  if (role == 'owner') return FontAwesomeIcons.crown;
+  if (role == 'player') return FontAwesomeIcons.handFist;
+  if (role == 'judge') return FontAwesomeIcons.scaleBalanced;
+  return FontAwesomeIcons.userCircle;
 }
 
 class _SettingsPageState extends State<SettingsPage> {
@@ -4273,7 +4277,7 @@ try {
                             width: double.infinity,
                             child: OutlinedButton.icon(
                               onPressed: _uploadingBackground ? null : _uploadBackgroundPhoto,
-                              icon: const Icon(Icons.photo_library),
+                              icon: const FaIcon(FontAwesomeIcons.images),
                               label: Text(_uploadingBackground ? 'Uploading...' : 'Upload Photo'),
                             ),
                           ),
@@ -4697,7 +4701,7 @@ class _RulesPageState extends State<RulesPage> {
         actions: [
           if (widget.isOwner && !_loading)
             IconButton(
-              icon: Icon(_editing ? Icons.close : Icons.edit),
+              icon: FaIcon(_editing ? FontAwesomeIcons.xmark : FontAwesomeIcons.pencil),
               onPressed: _saving
                   ? null
                   : () => setState(() => _editing = !_editing),
@@ -4725,7 +4729,7 @@ class _RulesPageState extends State<RulesPage> {
                                 onTap: _editing ? () => _showRuleDialog(editIndex: i) : null,
                                 trailing: _editing
                                     ? IconButton(
-                                        icon: const Icon(Icons.close, color: Colors.redAccent),
+                                        icon: const FaIcon(FontAwesomeIcons.xmark, color: Colors.redAccent),
                                         onPressed: () => _deleteRule(i),
                                       )
                                     : null,
@@ -4735,7 +4739,7 @@ class _RulesPageState extends State<RulesPage> {
                             const SizedBox(height: 8),
                             OutlinedButton.icon(
                               onPressed: () => _showRuleDialog(),
-                              icon: const Icon(Icons.add),
+                              icon: const FaIcon(FontAwesomeIcons.plus),
                               label: const Text('Add Rule'),
                             ),
                             const SizedBox(height: 16),
@@ -4920,7 +4924,7 @@ final Map<String, Future<String>> _signedUrlCache = {};
         child: Wrap(
           children: [
             ListTile(
-              leading: const Icon(Icons.camera_alt),
+              leading: const FaIcon(FontAwesomeIcons.camera),
               title: const Text('Take Photo'),
               onTap: () {
                 Navigator.pop(context);
@@ -4928,7 +4932,7 @@ final Map<String, Future<String>> _signedUrlCache = {};
               },
             ),
             ListTile(
-              leading: const Icon(Icons.photo_library),
+              leading: const FaIcon(FontAwesomeIcons.images),
               title: const Text('Choose from Gallery'),
               onTap: () {
                 Navigator.pop(context);
@@ -4999,7 +5003,7 @@ final Map<String, Future<String>> _signedUrlCache = {};
                 ? const Center(child: CircularProgressIndicator())
                 : _messages.isEmpty
                     ? const _EmptyState(
-                        icon: Icons.chat_bubble_outline,
+                        icon: FontAwesomeIcons.commentDots,
                         title: 'No messages yet',
                         subtitle: 'Say hi to start the conversation!',
                       )
@@ -5106,7 +5110,7 @@ final Map<String, Future<String>> _signedUrlCache = {};
                 children: [
          IconButton(
                     onPressed: _showAttachmentOptions,
-                    icon: const Icon(Icons.add_a_photo_outlined),
+                    icon: const FaIcon(FontAwesomeIcons.cameraRetro),
                   ),
                   Expanded(
                     child: TextField(
@@ -5120,7 +5124,7 @@ final Map<String, Future<String>> _signedUrlCache = {};
                   const SizedBox(width: 8),
                   IconButton(
                     onPressed: _sendMessage,
-                    icon: const Icon(Icons.send, color: Color(0xFFE10600)),
+                    icon: const FaIcon(FontAwesomeIcons.paperPlane, color: Color(0xFFE10600)),
                   ),
                 ],
               ),
@@ -5530,13 +5534,6 @@ Future<void> _issueWarning(Map<String, dynamic> member) async {
     }
   }
 
-  String _roleIcon(String role) {
-    if (role == 'owner') return '🗡️';
-    if (role == 'player') return '⚔️';
-    if (role == 'judge') return '⚖️';
-    return '👤';
-  }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -5555,10 +5552,7 @@ Future<void> _issueWarning(Map<String, dynamic> member) async {
 
                 return Card(
                   child: ListTile(
-                    leading: Text(
-                      _roleIcon(member['role']),
-                      style: const TextStyle(fontSize: 24),
-                    ),
+                    leading: FaIcon(roleIconData(member['role']), size: 24, color: Colors.white70),
                     title: Text(member['username'] ?? 'Unknown'),
                     subtitle: Text(
                       isOwnerRow
@@ -5577,8 +5571,8 @@ Future<void> _issueWarning(Map<String, dynamic> member) async {
                             children: [
                               if (member['owner_is_judge'] == true)
                                 IconButton(
-                                  icon: Icon(
-                                    Icons.camera_alt,
+                                  icon: FaIcon(
+                                    FontAwesomeIcons.camera,
                                     color: member['judge_also_plays'] == true
                                         ? const Color(0xFFE10600)
                                         : Colors.white38,
@@ -5601,7 +5595,7 @@ Future<void> _issueWarning(Map<String, dynamic> member) async {
                             mainAxisSize: MainAxisSize.min,
                             children: [
                               IconButton(
-                                icon: const Icon(Icons.swap_horiz, color: Colors.white70),
+                                icon: const FaIcon(FontAwesomeIcons.rightLeft, color: Colors.white70),
                                 tooltip: isJudge ? 'Make Player' : 'Make Judge',
                                 onPressed: () => _changeRole(
                                   member,
@@ -5610,8 +5604,8 @@ Future<void> _issueWarning(Map<String, dynamic> member) async {
                               ),
                               if (isJudge)
                                 IconButton(
-                                  icon: Icon(
-                                    Icons.camera_alt,
+                                  icon: FaIcon(
+                                    FontAwesomeIcons.camera,
                                     color: member['judge_also_plays'] == true
                                         ? const Color(0xFFE10600)
                                         : Colors.white38,
@@ -5626,11 +5620,11 @@ Future<void> _issueWarning(Map<String, dynamic> member) async {
                                 ),
                               if (isJudge)
                                 IconButton(
-                                  icon: const Icon(Icons.warning_amber, color: Colors.amber),
+                                  icon: const FaIcon(FontAwesomeIcons.triangleExclamation, color: Colors.amber),
                                   onPressed: () => _issueWarning(member),
                                 ),
                               IconButton(
-                                icon: const Icon(Icons.person_remove, color: Color(0xFFE10600)),
+                                icon: const FaIcon(FontAwesomeIcons.userMinus, color: Color(0xFFE10600)),
                                 onPressed: () => _removeMember(member),
                               ),
                             ],
@@ -5680,7 +5674,7 @@ class FullScreenPhotoPage extends StatelessWidget {
   }
 }
 class _EmptyState extends StatelessWidget {
-  final IconData icon;
+  final FaIconData icon;
   final String title;
   final String? subtitle;
 
@@ -5698,7 +5692,7 @@ class _EmptyState extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(
+            FaIcon(
               icon,
               size: 64,
               color: Colors.white.withOpacity(0.15),
@@ -5839,7 +5833,7 @@ class _ProfilePageState extends State<ProfilePage> {
           child: Wrap(
             children: [
               ListTile(
-                leading: const Icon(Icons.camera_alt),
+                leading: const FaIcon(FontAwesomeIcons.camera),
                 title: const Text('Take Photo'),
                 onTap: () async {
                   final img =
@@ -5848,7 +5842,7 @@ class _ProfilePageState extends State<ProfilePage> {
                 },
               ),
               ListTile(
-                leading: const Icon(Icons.photo_library),
+                leading: const FaIcon(FontAwesomeIcons.images),
                 title: const Text('Choose from Gallery'),
                 onTap: () async {
                   final img =
@@ -6045,8 +6039,8 @@ Future<void> _showDeleteConfirmation() async {
                               color: Color(0xFFE10600),
                               shape: BoxShape.circle,
                             ),
-                            child: const Icon(
-                              Icons.camera_alt,
+                            child: const FaIcon(
+                              FontAwesomeIcons.camera,
                               color: Colors.white,
                               size: 16,
                             ),
@@ -6111,9 +6105,9 @@ Future<void> _showDeleteConfirmation() async {
                             decoration: InputDecoration(
                               hintText: 'New password',
                               suffixIcon: IconButton(
-                                icon: Icon(_showPassword
-                                    ? Icons.visibility_off
-                                    : Icons.visibility),
+                                icon: FaIcon(_showPassword
+                                    ? FontAwesomeIcons.eyeSlash
+                                    : FontAwesomeIcons.eye),
                                 onPressed: () => setState(
                                     () => _showPassword = !_showPassword),
                               ),
@@ -6193,7 +6187,7 @@ class _OnboardingPageState extends State<OnboardingPage> {
 
   final List<Map<String, dynamic>> _pages = [
     {
-      'icon': Icons.sports_martial_arts,
+      'icon': FontAwesomeIcons.handFist,
       'title': 'My Nemesis',
       'subtitle': 'The daily photo battle game',
       'description':
@@ -6201,7 +6195,7 @@ class _OnboardingPageState extends State<OnboardingPage> {
       'color': Color(0xFFE10600),
     },
     {
-      'icon': Icons.camera_alt,
+      'icon': FontAwesomeIcons.camera,
       'title': 'How it works',
       'subtitle': 'Simple. Brutal. Fun.',
       'description':
@@ -6209,7 +6203,7 @@ class _OnboardingPageState extends State<OnboardingPage> {
       'color': Colors.white,
     },
     {
-      'icon': Icons.emoji_events,
+      'icon': FontAwesomeIcons.trophy,
       'title': 'Ready to battle?',
       'subtitle': 'Create a group and invite your nemesis',
       'description':
@@ -6276,7 +6270,7 @@ class _OnboardingPageState extends State<OnboardingPage> {
                               color: Colors.white.withOpacity(0.1),
                               border: Border.all(color: Colors.white, width: 2),
                             ),
-                            child: const Icon(Icons.description, size: 56, color: Colors.white),
+                            child: const FaIcon(FontAwesomeIcons.fileLines, size: 56, color: Colors.white),
                           ),
                           const SizedBox(height: 40),
                           const Text(
@@ -6360,8 +6354,8 @@ class _OnboardingPageState extends State<OnboardingPage> {
                               width: 2,
                             ),
                           ),
-                          child: Icon(
-                            page['icon'] as IconData,
+                          child: FaIcon(
+                            page['icon'] as FaIconData,
                             size: 56,
                             color: page['color'] as Color,
                           ),
@@ -6580,8 +6574,8 @@ class _SignUpPageState extends State<SignUpPage> {
   Widget _ruleRow(bool passed, String text) {
     return Row(
       children: [
-        Icon(
-          passed ? Icons.check_circle : Icons.cancel,
+        FaIcon(
+          passed ? FontAwesomeIcons.circleCheck : FontAwesomeIcons.circleXmark,
           size: 16,
           color: passed ? Colors.green : Colors.grey,
         ),
@@ -6635,7 +6629,7 @@ class _SignUpPageState extends State<SignUpPage> {
               decoration: const InputDecoration(
                 labelText: 'Nickname',
                 hintText: 'What should people call you?',
-                prefixIcon: Icon(Icons.person),
+                prefixIcon: FaIcon(FontAwesomeIcons.user),
               ),
             ),
             const SizedBox(height: 16),
@@ -6646,7 +6640,7 @@ class _SignUpPageState extends State<SignUpPage> {
               keyboardType: TextInputType.emailAddress,
               decoration: const InputDecoration(
                 labelText: 'Email',
-                prefixIcon: Icon(Icons.email),
+                prefixIcon: FaIcon(FontAwesomeIcons.envelope),
               ),
             ),
             const SizedBox(height: 16),
@@ -6658,11 +6652,11 @@ class _SignUpPageState extends State<SignUpPage> {
               onChanged: (_) => setState(() {}),
               decoration: InputDecoration(
                 labelText: 'Password',
-                prefixIcon: const Icon(Icons.lock),
+                prefixIcon: const FaIcon(FontAwesomeIcons.lock),
                 suffixIcon: IconButton(
-                  icon: Icon(_showPassword
-                      ? Icons.visibility_off
-                      : Icons.visibility),
+                  icon: FaIcon(_showPassword
+                      ? FontAwesomeIcons.eyeSlash
+                      : FontAwesomeIcons.eye),
                   onPressed: () =>
                       setState(() => _showPassword = !_showPassword),
                 ),
@@ -6700,11 +6694,11 @@ class _SignUpPageState extends State<SignUpPage> {
               onChanged: (_) => setState(() {}),
               decoration: InputDecoration(
                 labelText: 'Confirm Password',
-                prefixIcon: const Icon(Icons.lock_outline),
+                prefixIcon: const FaIcon(FontAwesomeIcons.lockOpen),
                 suffixIcon: IconButton(
-                  icon: Icon(_showConfirmPassword
-                      ? Icons.visibility_off
-                      : Icons.visibility),
+                  icon: FaIcon(_showConfirmPassword
+                      ? FontAwesomeIcons.eyeSlash
+                      : FontAwesomeIcons.eye),
                   onPressed: () => setState(
                       () => _showConfirmPassword = !_showConfirmPassword),
                 ),
@@ -6729,7 +6723,7 @@ class _SignUpPageState extends State<SignUpPage> {
                 ),
                 child: Row(
                   children: [
-                    const Icon(Icons.cake, size: 20),
+                    const FaIcon(FontAwesomeIcons.cakeCandles, size: 20),
                     const SizedBox(width: 12),
                     Text(
                       _birthday == null
