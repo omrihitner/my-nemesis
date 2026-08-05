@@ -1867,6 +1867,13 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
                     builder: (_) => NotificationSettingsPage(group: widget.group),
                   ),
                 );
+              } else if (value == 'weekly_recap') {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => WeeklyRecapPage(group: widget.group),
+                  ),
+                );
               } else if (value == 'profile') {
                 Navigator.push(
                   context,
@@ -1895,6 +1902,10 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
               const PopupMenuItem(
                 value: 'notifications',
                 child: Text('Notifications'),
+              ),
+              const PopupMenuItem(
+                value: 'weekly_recap',
+                child: Text('Weekly Recap'),
               ),
              if (isOwner) ...[
                 const PopupMenuItem(
@@ -3247,6 +3258,189 @@ return ListView(
     );
   }
 }
+class WeeklyRecapPage extends StatelessWidget {
+  final dynamic group;
+
+  const WeeklyRecapPage({super.key, required this.group});
+
+  Future<Map<String, dynamic>> fetchWeeklyRecap() async {
+    final supabase = Supabase.instance.client;
+
+    final now = DateTime.now();
+    final startOfWeek = DateTime(now.year, now.month, now.day)
+        .subtract(Duration(days: now.weekday - 1));
+    final endOfWeek = startOfWeek.add(const Duration(days: 7));
+
+    final submissions = await supabase
+        .from('submissions')
+        .select()
+        .eq('group_id', group['id'])
+        .gte('submitted_at', startOfWeek.toIso8601String())
+        .lt('submitted_at', endOfWeek.toIso8601String());
+
+    final submissionIds = submissions.map((s) => s['id']).toSet();
+    final allScores = await supabase.from('scores').select();
+    final weekScores =
+        allScores.where((sc) => submissionIds.contains(sc['submission_id'])).toList();
+
+    final users = await supabase.from('users').select();
+
+    final submissionCountByUser = <String, int>{};
+    final totalsByUser = <String, int>{};
+    final byDay = <String, List<dynamic>>{};
+
+    for (final s in submissions) {
+      final uid = s['user_id'] as String;
+      submissionCountByUser[uid] = (submissionCountByUser[uid] ?? 0) + 1;
+      final date = DateTime.parse(s['submitted_at'].toString());
+      byDay.putIfAbsent(_dateKeyForStreak(date), () => []).add(s);
+    }
+
+    for (final sc in weekScores) {
+      final submission = submissions.firstWhere(
+        (s) => s['id'] == sc['submission_id'],
+        orElse: () => <String, dynamic>{},
+      );
+      if (submission.isEmpty) continue;
+      final uid = submission['user_id'] as String;
+      totalsByUser[uid] = (totalsByUser[uid] ?? 0) + ((sc['score'] ?? 0) as int);
+    }
+
+    final winsByUser = <String, int>{};
+    for (final daySubs in byDay.values) {
+      final dayTotals = <String, int>{};
+      final submittedTimes = <String, String>{};
+      for (final s in daySubs) {
+        final uid = s['user_id'] as String;
+        submittedTimes[uid] = s['submitted_at'].toString();
+        final subScores = weekScores.where((sc) => sc['submission_id'] == s['id']);
+        for (final sc in subScores) {
+          dayTotals[uid] = (dayTotals[uid] ?? 0) + ((sc['score'] ?? 0) as int);
+        }
+      }
+      if (dayTotals.isEmpty) continue;
+
+      final maxScore = dayTotals.values.reduce((a, b) => a > b ? a : b);
+      final topIds = dayTotals.entries
+          .where((e) => e.value == maxScore)
+          .map((e) => e.key)
+          .toList()
+        ..sort((a, b) => submittedTimes[a]!.compareTo(submittedTimes[b]!));
+
+      final winnerId = topIds.first;
+      winsByUser[winnerId] = (winsByUser[winnerId] ?? 0) + 1;
+    }
+
+    final allUserIds = {
+      ...submissionCountByUser.keys,
+      ...totalsByUser.keys,
+      ...winsByUser.keys,
+    };
+
+    final rows = allUserIds.map((uid) {
+      final user = users.firstWhere(
+        (u) => u['id'] == uid,
+        orElse: () => {'username': 'Unknown'},
+      );
+      return {
+        'username': user['username'],
+        'submissions': submissionCountByUser[uid] ?? 0,
+        'total_score': totalsByUser[uid] ?? 0,
+        'wins': winsByUser[uid] ?? 0,
+      };
+    }).toList();
+
+    rows.sort((a, b) => (b['total_score'] as int).compareTo(a['total_score'] as int));
+
+    return {
+      'startOfWeek': startOfWeek,
+      'endOfWeek': endOfWeek.subtract(const Duration(days: 1)),
+      'rows': rows,
+    };
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    const months = [
+      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+    ];
+    String fmt(DateTime d) => '${d.day} ${months[d.month - 1]}';
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Weekly Recap')),
+      body: FutureBuilder<Map<String, dynamic>>(
+        future: fetchWeeklyRecap(),
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const Center(child: CircularProgressIndicator());
+          }
+
+          if (snapshot.hasError) {
+            return Center(child: Text('Error: ${snapshot.error}'));
+          }
+
+          final data = snapshot.data!;
+          final startOfWeek = data['startOfWeek'] as DateTime;
+          final endOfWeek = data['endOfWeek'] as DateTime;
+          final rows = data['rows'] as List<Map<String, dynamic>>;
+
+          if (rows.isEmpty) {
+            return const _EmptyState(
+              icon: FontAwesomeIcons.calendarCheck,
+              title: 'No activity yet this week',
+              subtitle: 'Submit a photo to see your weekly recap here.',
+            );
+          }
+
+          return ListView(
+            padding: const EdgeInsets.all(16),
+            children: [
+              Text(
+                'Week of ${fmt(startOfWeek)} – ${fmt(endOfWeek)}',
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 16),
+              ...rows.asMap().entries.map((entry) {
+                final index = entry.key;
+                final row = entry.value;
+
+                const palette = [
+                  Colors.redAccent,
+                  Colors.blueAccent,
+                  Colors.greenAccent,
+                  Colors.purpleAccent,
+                  Colors.orangeAccent,
+                  Colors.tealAccent,
+                  Colors.pinkAccent,
+                  Colors.amberAccent,
+                ];
+                final color = palette[index % palette.length];
+
+                return Card(
+                  child: ListTile(
+                    leading: index == 0
+                        ? const Text('🏆', style: TextStyle(fontSize: 28))
+                        : _MemberAvatar(username: row['username'] ?? '?', color: color),
+                    title: Text(row['username'] ?? 'Unknown'),
+                    subtitle: Text(
+                      '${row['submissions']} submitted • ${row['wins']} won this week',
+                    ),
+                    trailing: Text(
+                      '${row['total_score']} pts',
+                      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                );
+              }),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
 class BattleDetailsPage extends StatelessWidget {
   final dynamic group;
   final dynamic item;
@@ -4231,6 +4425,40 @@ const List<String> kChallengePrompts = [
   'Something that smells good',
   'Something with numbers on it',
   'Something you\'re proud of',
+  'Something green',
+  'Something yellow',
+  'Something purple',
+  'Something cold',
+  'Something warm',
+  'Something that makes you laugh',
+  'Something you\'re wearing',
+  'Something with a story behind it',
+  'Something you forgot you had',
+  'Something with wings',
+  'Something with legs',
+  'Something you\'d never throw away',
+  'Something that reminds you of childhood',
+  'Something embarrassing',
+  'Something expensive',
+  'Something cheap',
+  'Something you made yourself',
+  'Something from another country',
+  'Something transparent',
+  'Something in your pocket right now',
+  'Something that spins',
+  'Something you use only once a year',
+  'Something square',
+  'Something metallic',
+  'Something furry',
+  'Something wet',
+  'Something that glows',
+  'Something small enough to fit in your hand',
+  'Something bigger than your head',
+  'Something pointy',
+  'Something you\'d give as a gift',
+  'Something you use in the kitchen',
+  'Something with text on it',
+  'Something you\'re grateful for',
 ];
 
 final DateTime _challengeEpoch = DateTime(2024, 1, 1);
