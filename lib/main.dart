@@ -555,6 +555,107 @@ Future<Map<String, int>> fetchGroupStreaks(String groupId) async {
   return streaks;
 }
 
+/// Lifetime achievement stats for a user, aggregated across every group
+/// they belong to (longest streak is the best of any single group, not
+/// summed across groups; wins and disqualifications are totals).
+Future<Map<String, int>> fetchUserAchievements(String userId) async {
+  final supabase = Supabase.instance.client;
+
+  final memberships = await supabase
+      .from('group_members')
+      .select('group_id')
+      .eq('user_id', userId);
+
+  final groupIds = memberships.map((m) => m['group_id'] as String).toSet();
+
+  var longestStreak = 0;
+  var totalWins = 0;
+  var totalDisqualifications = 0;
+
+  for (final groupId in groupIds) {
+    final submissions = await supabase
+        .from('submissions')
+        .select()
+        .eq('group_id', groupId);
+
+    if (submissions.isEmpty) continue;
+
+    final submissionIds = submissions.map((s) => s['id']).toSet();
+    final allScores = await supabase.from('scores').select();
+    final groupScores =
+        allScores.where((sc) => submissionIds.contains(sc['submission_id'])).toList();
+
+    // Longest streak this user ever had in this group.
+    final myDates = submissions
+        .where((s) => s['user_id'] == userId)
+        .map((s) => DateTime.parse(s['submitted_at'].toString()))
+        .map((d) => DateTime(d.year, d.month, d.day))
+        .toSet()
+        .toList()
+      ..sort();
+
+    if (myDates.isNotEmpty) {
+      var currentRun = 1;
+      var best = 1;
+      for (var i = 1; i < myDates.length; i++) {
+        final diff = myDates[i].difference(myDates[i - 1]).inDays;
+        currentRun = diff == 1 ? currentRun + 1 : 1;
+        if (currentRun > best) best = currentRun;
+      }
+      if (best > longestStreak) longestStreak = best;
+    }
+
+    // Disqualifications: scores marked disqualified on this user's own submissions.
+    for (final sc in groupScores) {
+      if (sc['disqualified'] != true) continue;
+      final submission = submissions.firstWhere(
+        (s) => s['id'] == sc['submission_id'],
+        orElse: () => {},
+      );
+      if (submission['user_id'] == userId) totalDisqualifications++;
+    }
+
+    // Wins: for each day, whoever had the highest total score (earliest
+    // submission breaking ties) is the winner.
+    final byDay = <String, List<dynamic>>{};
+    for (final s in submissions) {
+      final date = DateTime.parse(s['submitted_at'].toString());
+      byDay.putIfAbsent(_dateKeyForStreak(date), () => []).add(s);
+    }
+
+    for (final daySubs in byDay.values) {
+      final totals = <String, int>{};
+      final submittedTimes = <String, String>{};
+
+      for (final s in daySubs) {
+        final uid = s['user_id'] as String;
+        submittedTimes[uid] = s['submitted_at'].toString();
+        final subScores = groupScores.where((sc) => sc['submission_id'] == s['id']);
+        for (final sc in subScores) {
+          totals[uid] = (totals[uid] ?? 0) + ((sc['score'] ?? 0) as int);
+        }
+      }
+
+      if (totals.isEmpty) continue;
+
+      final maxScore = totals.values.reduce((a, b) => a > b ? a : b);
+      final topUserIds = totals.entries
+          .where((e) => e.value == maxScore)
+          .map((e) => e.key)
+          .toList()
+        ..sort((a, b) => submittedTimes[a]!.compareTo(submittedTimes[b]!));
+
+      if (topUserIds.first == userId) totalWins++;
+    }
+  }
+
+  return {
+    'longestStreak': longestStreak,
+    'totalWins': totalWins,
+    'totalDisqualifications': totalDisqualifications,
+  };
+}
+
 void navigateToGroupTab(BuildContext context, dynamic group, int index) {
   late final Widget page;
   switch (index) {
@@ -573,6 +674,8 @@ void navigateToGroupTab(BuildContext context, dynamic group, int index) {
     default:
       return;
   }
+
+  HapticFeedback.selectionClick();
 
   Navigator.pushReplacement(
     context,
@@ -1019,6 +1122,8 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
     if (!mounted) return;
 
     final text = challengeTextFor(widget.group['id'], today);
+
+    HapticFeedback.mediumImpact();
 
     showDialog(
       context: context,
@@ -1567,6 +1672,8 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
 
       if (!mounted) return;
 
+      HapticFeedback.mediumImpact();
+
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Photo submitted! ✅'),
@@ -1606,7 +1713,10 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
 
   Widget _middleActionButton({required bool showCamera, required VoidCallback onTap}) {
     return GestureDetector(
-      onTap: onTap,
+      onTap: () {
+        HapticFeedback.selectionClick();
+        onTap();
+      },
       child: Container(
         width: 46,
         height: 46,
@@ -2500,6 +2610,8 @@ Future<void> saveScore(String submissionId, int score) async {
       'disqualified': false,
     });
 
+    HapticFeedback.lightImpact();
+
     // Notify the photo owner
     final submission = await supabase
         .from('submissions')
@@ -2767,6 +2879,8 @@ if (myScore == 0)
       });
 
       if (!context.mounted) return;
+
+      HapticFeedback.mediumImpact();
 
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Photo disqualified')),
@@ -5410,6 +5524,7 @@ class _NotificationSettingsPageState extends State<NotificationSettingsPage> {
   bool _notifyUploads = true;
   bool _notifyJudgeReminder = true;
   bool _notifyRules = true;
+  bool _notifySubmissionReminder = true;
   bool _loading = true;
   bool _saving = false;
 
@@ -5439,6 +5554,7 @@ class _NotificationSettingsPageState extends State<NotificationSettingsPage> {
         _notifyUploads = membership['notify_uploads'] ?? true;
         _notifyJudgeReminder = membership['notify_judge_reminder'] ?? true;
         _notifyRules = membership['notify_rules'] ?? true;
+        _notifySubmissionReminder = membership['notify_submission_reminder'] ?? true;
         _loading = false;
       });
     } catch (e) {
@@ -5457,6 +5573,7 @@ class _NotificationSettingsPageState extends State<NotificationSettingsPage> {
       if (column == 'notify_uploads') _notifyUploads = value;
       if (column == 'notify_judge_reminder') _notifyJudgeReminder = value;
       if (column == 'notify_rules') _notifyRules = value;
+      if (column == 'notify_submission_reminder') _notifySubmissionReminder = value;
       _saving = true;
     });
 
@@ -5537,6 +5654,17 @@ class _NotificationSettingsPageState extends State<NotificationSettingsPage> {
                       onChanged: _saving
                           ? null
                           : (v) => _update('notify_rules', v),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Card(
+                    child: SwitchListTile(
+                      title: const Text('Submission Reminders'),
+                      subtitle: const Text('Remind me if I haven\'t submitted today\'s photo'),
+                      value: _notifySubmissionReminder,
+                      onChanged: _saving
+                          ? null
+                          : (v) => _update('notify_submission_reminder', v),
                     ),
                   ),
                 ],
@@ -6319,6 +6447,50 @@ Future<void> _showDeleteConfirmation() async {
                     ),
                   ),
                   const SizedBox(height: 32),
+                  FutureBuilder<Map<String, int>>(
+                    future: supabase.auth.currentUser == null
+                        ? null
+                        : fetchUserAchievements(supabase.auth.currentUser!.id),
+                    builder: (context, snapshot) {
+                      final stats = snapshot.data;
+                      if (stats == null) return const SizedBox.shrink();
+
+                      Widget stat(String emoji, String value, String label) {
+                        return Column(
+                          children: [
+                            Text(emoji, style: const TextStyle(fontSize: 22)),
+                            const SizedBox(height: 4),
+                            Text(
+                              value,
+                              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                            ),
+                            Text(
+                              label,
+                              style: TextStyle(fontSize: 11, color: Colors.white.withOpacity(0.6)),
+                              textAlign: TextAlign.center,
+                            ),
+                          ],
+                        );
+                      }
+
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 16),
+                        child: Card(
+                          child: Padding(
+                            padding: const EdgeInsets.all(16),
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                              children: [
+                                stat('🔥', '${stats['longestStreak']}', 'Longest\nStreak'),
+                                stat('🏆', '${stats['totalWins']}', 'Total\nWins'),
+                                stat('🚫', '${stats['totalDisqualifications']}', 'Disqualifi-\ncations'),
+                              ],
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
                   Card(
                     child: Padding(
                       padding: const EdgeInsets.all(16),
