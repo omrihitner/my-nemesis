@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math';
 import 'package:image_picker/image_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -512,6 +513,48 @@ Future<int> fetchGroupUnreadCount(String groupId) async {
   return unread.length;
 }
 
+String _dateKeyForStreak(DateTime date) {
+  return '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
+}
+
+/// Current consecutive-day submission streak per user in a group. A streak
+/// stays alive through the end of today even if today isn't submitted yet
+/// (it only breaks once a full calendar day is missed).
+Future<Map<String, int>> fetchGroupStreaks(String groupId) async {
+  final supabase = Supabase.instance.client;
+
+  final submissions = await supabase
+      .from('submissions')
+      .select()
+      .eq('group_id', groupId);
+
+  final datesByUser = <String, Set<String>>{};
+  for (final s in submissions) {
+    final userId = s['user_id'] as String;
+    final date = DateTime.parse(s['submitted_at'].toString());
+    datesByUser.putIfAbsent(userId, () => {}).add(_dateKeyForStreak(date));
+  }
+
+  final today = DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day);
+  final streaks = <String, int>{};
+
+  datesByUser.forEach((userId, dates) {
+    var cursor = today;
+    if (!dates.contains(_dateKeyForStreak(cursor))) {
+      cursor = cursor.subtract(const Duration(days: 1));
+    }
+
+    var streak = 0;
+    while (dates.contains(_dateKeyForStreak(cursor))) {
+      streak++;
+      cursor = cursor.subtract(const Duration(days: 1));
+    }
+    streaks[userId] = streak;
+  });
+
+  return streaks;
+}
+
 void navigateToGroupTab(BuildContext context, dynamic group, int index) {
   late final Widget page;
   switch (index) {
@@ -956,6 +999,40 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
   void initState() {
     super.initState();
     _loadMyRole();
+    _maybeShowChallengePopup();
+  }
+
+  Future<void> _maybeShowChallengePopup() async {
+    final challengesPerWeek = widget.group['challenges_per_week'] ?? 0;
+    if (challengesPerWeek <= 0) return;
+
+    final today = DateTime.now();
+    if (!isChallengeDay(widget.group['id'], challengesPerWeek, today)) return;
+
+    final prefs = await SharedPreferences.getInstance();
+    final todayKey = '${today.year}-${today.month}-${today.day}';
+    final seenKey = 'challenge_seen_${widget.group['id']}_$todayKey';
+    if (prefs.getBool(seenKey) == true) return;
+
+    await prefs.setBool(seenKey, true);
+
+    if (!mounted) return;
+
+    final text = challengeTextFor(widget.group['id'], today);
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('🎯 Today\'s Challenge!'),
+        content: Text(text),
+        actions: [
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Got it'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _loadMyRole() async {
@@ -1049,6 +1126,8 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
         .select()
         .inFilter('id', userIds);
 
+    final streaks = await fetchGroupStreaks(widget.group['id']);
+
     return members.map<Map<String, dynamic>>((member) {
       final user = users.firstWhere(
         (u) => u['id'] == member['user_id'],
@@ -1058,6 +1137,7 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
       return {
         'username': user['username'],
         'role': member['role'],
+        'streak': streaks[member['user_id']] ?? 0,
       };
     }).toList();
   }
@@ -1805,6 +1885,29 @@ body: RefreshIndicator(
                 },
               ),
               const SizedBox(height: 20),
+              Builder(
+                builder: (context) {
+                  final challengesPerWeek = widget.group['challenges_per_week'] ?? 0;
+                  final today = DateTime.now();
+                  if (!isChallengeDay(widget.group['id'], challengesPerWeek, today)) {
+                    return const SizedBox.shrink();
+                  }
+                  final text = challengeTextFor(widget.group['id'], today);
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 16),
+                    child: Card(
+                      color: const Color(0xFFE10600).withOpacity(0.15),
+                      child: Padding(
+                        padding: const EdgeInsets.all(14),
+                        child: Text(
+                          '🎯 Today\'s Challenge: $text',
+                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              ),
               FutureBuilder<List<String>>(
                 future: _checkNewUploads(),
                 builder: (context, snapshot) {
@@ -1962,6 +2065,11 @@ body: RefreshIndicator(
                                       style: const TextStyle(fontSize: 15),
                                     ),
                                   ),
+                                  if ((m['streak'] ?? 0) > 0)
+                                    Text(
+                                      '🔥 ${m['streak']}',
+                                      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+                                    ),
                                 ],
                               ),
                             );
@@ -2417,11 +2525,29 @@ Future<void> saveScore(String submissionId, int score) async {
 
   @override
   Widget build(BuildContext context) {
+    final challengesPerWeek = widget.group['challenges_per_week'] ?? 0;
+    final today = DateTime.now();
+    final isTodayChallenge = isChallengeDay(widget.group['id'], challengesPerWeek, today);
+    final challengeText = isTodayChallenge ? challengeTextFor(widget.group['id'], today) : null;
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('Judge Photos'),
       ),
-      body: Builder(
+      body: Column(
+        children: [
+          if (challengeText != null)
+            Container(
+              width: double.infinity,
+              color: const Color(0xFFE10600).withOpacity(0.15),
+              padding: const EdgeInsets.all(14),
+              child: Text(
+                '🎯 Today\'s Challenge: $challengeText',
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
+            ),
+          Expanded(
+            child: Builder(
         builder: (context) {
           if (_loading) {
             return const Center(child: CircularProgressIndicator());
@@ -2696,6 +2822,9 @@ if (myScore == 0)
           );
         },
       ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -2859,6 +2988,7 @@ final submissions = await supabase
         .toList();
 
     final users = await supabase.from('users').select();
+    final streaks = await fetchGroupStreaks(group['id']);
 
     final results = <Map<String, dynamic>>[];
 
@@ -2890,6 +3020,7 @@ final submissions = await supabase
         'username': user['username'],
         'role': member['role'],
         'total_score': totalScore,
+        'streak': streaks[userId] ?? 0,
       });
     }
 
@@ -2981,7 +3112,9 @@ return ListView(
                   color: color,
                 ),
           title: Text(row['username']),
-          subtitle: Text(row['role']),
+          subtitle: Text(
+            (row['streak'] ?? 0) > 0 ? '${row['role']} • 🔥 ${row['streak']}' : row['role'],
+          ),
           trailing: Text(
             '${row['total_score']} pts',
             style: const TextStyle(
@@ -3959,6 +4092,61 @@ FaIconData roleIconData(String? role) {
   return FontAwesomeIcons.userCircle;
 }
 
+const List<String> kChallengePrompts = [
+  'Something orange',
+  'Something that can fly',
+  'A reflection',
+  'Something round',
+  'Something you can eat',
+  'Something with wheels',
+  'Something taller than you',
+  'Something soft',
+  'Something shiny',
+  'Something striped',
+  'Something with a face',
+  'Something older than you',
+  'Something you use every day',
+  'Something blue',
+  'Something broken',
+  'Something you\'d bring to a desert island',
+  'Something that makes noise',
+  'Something upside down',
+  'A shadow',
+  'Something handmade',
+  'Something in nature',
+  'Something that smells good',
+  'Something with numbers on it',
+  'Something you\'re proud of',
+];
+
+final DateTime _challengeEpoch = DateTime(2024, 1, 1);
+
+int _daysSinceEpoch(DateTime date) {
+  return DateTime(date.year, date.month, date.day).difference(_challengeEpoch).inDays;
+}
+
+Set<int> _challengeWeekdaysForWeek(String groupId, int weekIndex, int challengesPerWeek) {
+  if (challengesPerWeek <= 0) return {};
+  final seed = (groupId.hashCode ^ (weekIndex * 7919)) & 0x7fffffff;
+  final weekdays = List.generate(7, (i) => i)..shuffle(Random(seed));
+  return weekdays.take(challengesPerWeek.clamp(0, 7)).toSet();
+}
+
+/// Deterministic: same group + same calendar day always gives the same
+/// answer for every member, without needing a scheduled backend job.
+bool isChallengeDay(String groupId, int challengesPerWeek, DateTime date) {
+  if (challengesPerWeek <= 0) return false;
+  final weekIndex = _daysSinceEpoch(date) ~/ 7;
+  final weekdays = _challengeWeekdaysForWeek(groupId, weekIndex, challengesPerWeek);
+  return weekdays.contains(date.weekday % 7);
+}
+
+String challengeTextFor(String groupId, DateTime date) {
+  final dayIndex = _daysSinceEpoch(date);
+  final seed = (groupId.hashCode ^ (dayIndex * 104729)) & 0x7fffffff;
+  return kChallengePrompts[Random(seed).nextInt(kChallengePrompts.length)];
+}
+
 class _SettingsPageState extends State<SettingsPage> {
   bool _anonymousJudging = false;
   bool _loading = true;
@@ -3969,6 +4157,7 @@ class _SettingsPageState extends State<SettingsPage> {
   final _nameController = TextEditingController();
   String? _backgroundColor;
   String? _backgroundPhotoUrl;
+  int _challengesPerWeek = 0;
 
   @override
   void initState() {
@@ -3999,6 +4188,7 @@ class _SettingsPageState extends State<SettingsPage> {
         _nameController.text = group['name'] ?? '';
         _backgroundColor = group['background_color'];
         _backgroundPhotoUrl = group['background_photo_url'];
+        _challengesPerWeek = group['challenges_per_week'] ?? 0;
         _loading = false;
       });
     } catch (e) {
@@ -4049,6 +4239,47 @@ try {
       // Revert the switch if saving failed
       setState(() => _anonymousJudging = !value);
 
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error saving setting: $e')),
+      );
+    }
+
+    if (!mounted) return;
+    setState(() => _saving = false);
+  }
+
+  Future<void> _updateChallengesPerWeek(int value) async {
+    final supabase = Supabase.instance.client;
+    final previous = _challengesPerWeek;
+
+    setState(() {
+      _challengesPerWeek = value;
+      _saving = true;
+    });
+
+    try {
+      final result = await supabase
+          .from('groups')
+          .update({'challenges_per_week': value})
+          .eq('id', widget.group['id'])
+          .select();
+
+      if (!mounted) return;
+
+      if (result.isEmpty) {
+        setState(() => _challengesPerWeek = previous);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Save blocked by database permissions')),
+        );
+      } else {
+        widget.group['challenges_per_week'] = value;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Setting saved')),
+        );
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _challengesPerWeek = previous);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Error saving setting: $e')),
       );
@@ -4304,6 +4535,36 @@ try {
                       ),
                       value: _anonymousJudging,
                       onChanged: _saving ? null : _updateAnonymousJudging,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text('Challenge Mode', style: TextStyle(fontWeight: FontWeight.bold)),
+                          const SizedBox(height: 4),
+                          const Text(
+                            'Random days each week get a themed photo challenge (e.g. "something orange") instead of a free choice.',
+                            style: TextStyle(fontSize: 13, color: Colors.white70),
+                          ),
+                          const SizedBox(height: 12),
+                          Wrap(
+                            spacing: 8,
+                            children: [0, 1, 2].map((n) {
+                              return ChoiceChip(
+                                label: Text(n == 0 ? 'Off' : '$n / week'),
+                                selected: _challengesPerWeek == n,
+                                onSelected: _saving
+                                    ? null
+                                    : (_) => _updateChallengesPerWeek(n),
+                              );
+                            }).toList(),
+                          ),
+                        ],
+                      ),
                     ),
                   ),
                 ],
