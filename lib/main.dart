@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'dart:math';
+import 'dart:ui';
 import 'package:image_picker/image_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -13,6 +14,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
+import 'package:cached_network_image/cached_network_image.dart';
+import 'package:firebase_crashlytics/firebase_crashlytics.dart';
 
 const supabaseUrl = 'https://pwlidahqnfczjgqikzzy.supabase.co';
 const supabaseAnonKey = 'sb_publishable_xDxJd7g0SvwMtQ9L-1BATQ__ql0v8Ay';
@@ -40,19 +43,18 @@ Future<void> main() async {
 
   await Firebase.initializeApp();
 
+  // Route uncaught errors to Crashlytics instead of only the debug console.
+  FlutterError.onError = FirebaseCrashlytics.instance.recordFlutterFatalError;
+  PlatformDispatcher.instance.onError = (error, stack) {
+    FirebaseCrashlytics.instance.recordError(error, stack, fatal: true);
+    return true;
+  };
+
   // Lock to portrait mode
   await SystemChrome.setPreferredOrientations([
     DeviceOrientation.portraitUp,
     DeviceOrientation.portraitDown,
   ]);
-
-  // Request notification permission
-  final messaging = FirebaseMessaging.instance;
-  await messaging.requestPermission(
-    alert: true,
-    badge: true,
-    sound: true,
-  );
 
   await Supabase.initialize(
     url: supabaseUrl,
@@ -656,6 +658,30 @@ Future<Map<String, int>> fetchUserAchievements(String userId) async {
   };
 }
 
+/// Turns a raw exception into a short, user-friendly message instead of
+/// showing Dart/Postgrest internals directly in a snackbar.
+String friendlyError(Object e) {
+  final message = e.toString().toLowerCase();
+  if (message.contains('network') ||
+      message.contains('socket') ||
+      message.contains('failed host lookup') ||
+      message.contains('connection')) {
+    return 'No internet connection. Please check your network and try again.';
+  }
+  if (message.contains('permission') ||
+      message.contains('rls') ||
+      message.contains('policy')) {
+    return 'You don\'t have permission to do that.';
+  }
+  if (message.contains('duplicate') || message.contains('unique constraint')) {
+    return 'That already exists.';
+  }
+  if (message.contains('timeout')) {
+    return 'The request timed out. Please try again.';
+  }
+  return 'Something went wrong. Please try again.';
+}
+
 void navigateToGroupTab(BuildContext context, dynamic group, int index) {
   late final Widget page;
   switch (index) {
@@ -712,6 +738,50 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   final supabase = Supabase.instance.client;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _maybeShowNotificationPrompt());
+  }
+
+  Future<void> _maybeShowNotificationPrompt() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (prefs.getBool('notification_prompt_shown') == true) return;
+    await prefs.setBool('notification_prompt_shown', true);
+
+    if (!mounted) return;
+
+    final enable = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: const Text('🔔 Stay in the loop'),
+        content: const Text(
+          'Turn on notifications to know when it\'s your turn to judge, '
+          'someone uploads a photo, or your score comes in.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Not now'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Enable'),
+          ),
+        ],
+      ),
+    );
+
+    if (enable == true) {
+      await FirebaseMessaging.instance.requestPermission(
+        alert: true,
+        badge: true,
+        sound: true,
+      );
+    }
+  }
 
   Future<void> logout() async {
     await supabase.auth.signOut();
@@ -791,7 +861,8 @@ class _HomePageState extends State<HomePage> {
             child: Stack(
               fit: StackFit.expand,
               children: [
-                if (signedUrl != null) Image.network(signedUrl, fit: BoxFit.cover),
+                if (signedUrl != null)
+                  CachedNetworkImage(imageUrl: signedUrl, fit: BoxFit.cover),
                 if (signedUrl != null)
                   Container(color: Colors.black.withOpacity(0.45)),
                 Padding(
@@ -1355,6 +1426,47 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
     );
   }
 
+  Future<List<Map<String, dynamic>>> _fetchAllNotices() async {
+    final notices = <Map<String, dynamic>>[];
+
+    final challengesPerWeek = widget.group['challenges_per_week'] ?? 0;
+    final today = DateTime.now();
+    if (isChallengeDay(widget.group['id'], challengesPerWeek, today)) {
+      final text = challengeTextFor(widget.group['id'], today);
+      notices.add({'text': '🎯 Today\'s Challenge: $text'});
+    }
+
+    final names = await _checkNewUploads();
+    if (names.isNotEmpty) {
+      final text = names.length == 1
+          ? '📸 ${names.first} just uploaded their photo!'
+          : '📸 ${names.join(', ')} just uploaded their photos!';
+      notices.add({'text': text});
+    }
+
+    final warningStatus = await _myWarningStatus();
+    if (warningStatus != null && (warningStatus['unseen'] ?? 0) > 0) {
+      final total = warningStatus['total']!;
+      notices.add({
+        'text': total == 1
+            ? '⚠️ You have 1 warning for missed judging.'
+            : '⚠️ You have $total warnings for missed judging.',
+        'action': () => _acknowledgeWarnings(total),
+      });
+    }
+
+    final pending = await _checkPendingJudging();
+    if (pending > 0) {
+      notices.add({
+        'text': pending == 1
+            ? '⚖️ 1 photo is waiting for your score!'
+            : '⚖️ $pending photos are waiting for your score!',
+      });
+    }
+
+    return notices;
+  }
+
   Future<List<String>> _checkNewUploads() async {
     final supabase = Supabase.instance.client;
     final user = supabase.auth.currentUser;
@@ -1523,6 +1635,139 @@ Future<Map<String, dynamic>> _fetchHeaderData() async {
 
 Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
 
+  Future<void> _leaveGroup() async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Leave Group'),
+        content: Text(
+          'Are you sure you want to leave "${widget.group['name'] ?? 'this group'}"? '
+          'You\'ll need a new invite to rejoin.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Leave'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    final supabase = Supabase.instance.client;
+    final user = supabase.auth.currentUser;
+    if (user == null) return;
+
+    try {
+      await supabase
+          .from('group_members')
+          .delete()
+          .eq('group_id', widget.group['id'])
+          .eq('user_id', user.id);
+
+      if (!mounted) return;
+
+      Navigator.pushAndRemoveUntil(
+        context,
+        MaterialPageRoute(builder: (_) => const HomePage()),
+        (route) => false,
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(friendlyError(e))),
+      );
+    }
+  }
+
+  Future<void> _deleteGroup() async {
+    final controller = TextEditingController();
+
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setDialogState) => AlertDialog(
+          title: const Text('Delete Group'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'This permanently deletes the group, all photos, scores, messages, '
+                'and members. This cannot be undone.',
+              ),
+              const SizedBox(height: 16),
+              Text(
+                'Type "${widget.group['name'] ?? 'DELETE'}" to confirm:',
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: controller,
+                onChanged: (_) => setDialogState(() {}),
+                decoration: const InputDecoration(border: OutlineInputBorder()),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
+              onPressed: controller.text.trim() == (widget.group['name'] ?? 'DELETE')
+                  ? () => Navigator.pop(dialogContext, true)
+                  : null,
+              child: const Text('Delete Forever'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (confirm != true) return;
+
+    final supabase = Supabase.instance.client;
+    final groupId = widget.group['id'];
+
+    try {
+      final submissions = await supabase
+          .from('submissions')
+          .select('id')
+          .eq('group_id', groupId);
+      final submissionIds = submissions.map((s) => s['id']).toList();
+
+      if (submissionIds.isNotEmpty) {
+        await supabase.from('scores').delete().inFilter('submission_id', submissionIds);
+      }
+      await supabase.from('submissions').delete().eq('group_id', groupId);
+      await supabase.from('messages').delete().eq('group_id', groupId);
+      await supabase.from('invites').delete().eq('group_id', groupId);
+      await supabase.from('group_members').delete().eq('group_id', groupId);
+      await supabase.from('groups').delete().eq('id', groupId);
+
+      if (!mounted) return;
+
+      Navigator.pushAndRemoveUntil(
+        context,
+        MaterialPageRoute(builder: (_) => const HomePage()),
+        (route) => false,
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(friendlyError(e))),
+      );
+    }
+  }
+
   Future<void> _generateInvite(String role) async {
     final supabase = Supabase.instance.client;
     final user = supabase.auth.currentUser;
@@ -1633,6 +1878,7 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
 
       final image = await picker.pickImage(
         source: ImageSource.camera,
+        imageQuality: 85,
       );
 
       if (image == null) {
@@ -1684,7 +1930,7 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
 
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Upload error: $e'),
+          content: Text(friendlyError(e)),
         ),
       );
     }
@@ -1888,6 +2134,10 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
                     builder: (_) => ManageMembersPage(group: widget.group),
                   ),
                 );
+              } else if (value == 'leave_group') {
+                _leaveGroup();
+              } else if (value == 'delete_group') {
+                _deleteGroup();
               }
             },
           itemBuilder: (context) => [
@@ -1920,7 +2170,15 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
                   value: 'settings',
                   child: Text('Settings'),
                 ),
-              ],
+                const PopupMenuItem(
+                  value: 'delete_group',
+                  child: Text('Delete Group', style: TextStyle(color: Colors.redAccent)),
+                ),
+              ] else
+                const PopupMenuItem(
+                  value: 'leave_group',
+                  child: Text('Leave Group', style: TextStyle(color: Colors.redAccent)),
+                ),
             ],
           ),
         ],
@@ -1958,7 +2216,7 @@ body: RefreshIndicator(
                       fit: StackFit.expand,
                       children: [
                         if (backgroundUrl != null)
-                          Image.network(backgroundUrl, fit: BoxFit.cover),
+                          CachedNetworkImage(imageUrl: backgroundUrl, fit: BoxFit.cover),
                         Container(
                           decoration: BoxDecoration(
                             gradient: LinearGradient(
@@ -2006,111 +2264,40 @@ body: RefreshIndicator(
                 },
               ),
               const SizedBox(height: 20),
-              Builder(
-                builder: (context) {
-                  final challengesPerWeek = widget.group['challenges_per_week'] ?? 0;
-                  final today = DateTime.now();
-                  if (!isChallengeDay(widget.group['id'], challengesPerWeek, today)) {
-                    return const SizedBox.shrink();
-                  }
-                  final text = challengeTextFor(widget.group['id'], today);
-                  return Padding(
-                    padding: const EdgeInsets.only(bottom: 16),
-                    child: Card(
-                      color: const Color(0xFFE10600).withOpacity(0.15),
-                      child: Padding(
-                        padding: const EdgeInsets.all(14),
-                        child: Text(
-                          '🎯 Today\'s Challenge: $text',
-                          style: const TextStyle(fontWeight: FontWeight.bold),
-                        ),
-                      ),
-                    ),
-                  );
-                },
-              ),
-              FutureBuilder<List<String>>(
-                future: _checkNewUploads(),
+              FutureBuilder<List<Map<String, dynamic>>>(
+                future: _fetchAllNotices(),
                 builder: (context, snapshot) {
-                  final names = snapshot.data ?? [];
-                  if (names.isEmpty) return const SizedBox.shrink();
-
-                  final text = names.length == 1
-                      ? '📸 ${names.first} just uploaded their photo!'
-                      : '📸 ${names.join(', ')} just uploaded their photos!';
+                  final notices = snapshot.data ?? [];
+                  if (notices.isEmpty) return const SizedBox.shrink();
 
                   return Padding(
                     padding: const EdgeInsets.only(bottom: 16),
                     child: Card(
-                      color: const Color(0xFFE10600).withOpacity(0.15),
-                      child: Padding(
-                        padding: const EdgeInsets.all(14),
-                        child: Text(
-                          text,
-                          style: const TextStyle(fontWeight: FontWeight.bold),
-                        ),
-                      ),
-                    ),
-                  );
-                },
-              ),
-              FutureBuilder<Map<String, int>>(
-                future: _myWarningStatus(),
-                builder: (context, snapshot) {
-                  final status = snapshot.data;
-                  if (status == null || status['unseen'] == 0) {
-                    return const SizedBox.shrink();
-                  }
-
-                  final total = status['total']!;
-
-                  return Padding(
-                    padding: const EdgeInsets.only(bottom: 16),
-                    child: Card(
-                      color: Colors.red.withOpacity(0.15),
-                      child: Padding(
-                        padding: const EdgeInsets.all(14),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: Text(
-                                total == 1
-                                    ? '⚠️ You have 1 warning for missed judging.'
-                                    : '⚠️ You have $total warnings for missed judging.',
-                                style: const TextStyle(fontWeight: FontWeight.bold),
+                      color: const Color(0xFFE10600).withOpacity(0.1),
+                      child: Column(
+                        children: [
+                          for (var i = 0; i < notices.length; i++) ...[
+                            if (i > 0) const Divider(height: 1),
+                            Padding(
+                              padding: const EdgeInsets.all(14),
+                              child: Row(
+                                children: [
+                                  Expanded(
+                                    child: Text(
+                                      notices[i]['text'] as String,
+                                      style: const TextStyle(fontWeight: FontWeight.bold),
+                                    ),
+                                  ),
+                                  if (notices[i]['action'] != null)
+                                    TextButton(
+                                      onPressed: notices[i]['action'] as VoidCallback,
+                                      child: const Text('Got it'),
+                                    ),
+                                ],
                               ),
                             ),
-                            TextButton(
-                              onPressed: () => _acknowledgeWarnings(total),
-                              child: const Text('Got it'),
-                            ),
                           ],
-                        ),
-                      ),
-                    ),
-                  );
-                },
-              ),
-              FutureBuilder<int>(
-                future: _checkPendingJudging(),
-                builder: (context, snapshot) {
-                  final pending = snapshot.data ?? 0;
-                  if (pending == 0) return const SizedBox.shrink();
-
-                  final text = pending == 1
-                      ? '⚖️ 1 photo is waiting for your score!'
-                      : '⚖️ $pending photos are waiting for your score!';
-
-                  return Padding(
-                    padding: const EdgeInsets.only(bottom: 16),
-                    child: Card(
-                      color: Colors.amber.withOpacity(0.15),
-                      child: Padding(
-                        padding: const EdgeInsets.all(14),
-                        child: Text(
-                          text,
-                          style: const TextStyle(fontWeight: FontWeight.bold),
-                        ),
+                        ],
                       ),
                     ),
                   );
@@ -2727,8 +2914,8 @@ Future<void> saveScore(String submissionId, int score) async {
                       },
                       child: Stack(
                         children: [
-                          Image.network(
-                            submission['signed_url'],
+                          CachedNetworkImage(
+                            imageUrl: submission['signed_url'],
                             height: 300,
                             fit: BoxFit.cover,
                             width: double.infinity,
@@ -2831,7 +3018,7 @@ if (myScore == 0)
 
                                       ScaffoldMessenger.of(context).showSnackBar(
                                         SnackBar(
-                                          content: Text('Score error: $e'),
+                                          content: Text(friendlyError(e)),
                                         ),
                                       );
                                     }
@@ -2902,7 +3089,7 @@ if (myScore == 0)
       if (!context.mounted) return;
 
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Disqualify error: $e')),
+        SnackBar(content: Text(friendlyError(e))),
       );
     }
   },
@@ -3722,8 +3909,8 @@ class _PhotoCarouselState extends State<_PhotoCarousel> {
                             children: [
                               ClipRRect(
                                 borderRadius: BorderRadius.circular(12),
-                                child: Image.network(
-                                  photo['signed_url'],
+                                child: CachedNetworkImage(
+                                  imageUrl: photo['signed_url'],
                                   height: 240,
                                   width: double.infinity,
                                   fit: BoxFit.cover,
@@ -4537,7 +4724,7 @@ class _SettingsPageState extends State<SettingsPage> {
       if (!mounted) return;
       setState(() => _loading = false);
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error loading settings: $e')),
+        SnackBar(content: Text(friendlyError(e))),
       );
     }
   }
@@ -4582,7 +4769,7 @@ try {
       setState(() => _anonymousJudging = !value);
 
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error saving setting: $e')),
+        SnackBar(content: Text(friendlyError(e))),
       );
     }
 
@@ -4623,7 +4810,7 @@ try {
       if (!mounted) return;
       setState(() => _challengesPerWeek = previous);
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error saving setting: $e')),
+        SnackBar(content: Text(friendlyError(e))),
       );
     }
 
@@ -4666,7 +4853,7 @@ try {
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error updating name: $e')),
+        SnackBar(content: Text(friendlyError(e))),
       );
     }
 
@@ -4694,7 +4881,7 @@ try {
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error updating background: $e')),
+        SnackBar(content: Text(friendlyError(e))),
       );
     }
   }
@@ -4739,7 +4926,7 @@ try {
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error uploading background: $e')),
+        SnackBar(content: Text(friendlyError(e))),
       );
     }
 
@@ -4767,7 +4954,7 @@ try {
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error resetting background: $e')),
+        SnackBar(content: Text(friendlyError(e))),
       );
     }
   }
@@ -5164,7 +5351,7 @@ class _RulesPageState extends State<RulesPage> {
       if (!mounted) return;
       setState(() => _loading = false);
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error loading rules: $e')),
+        SnackBar(content: Text(friendlyError(e))),
       );
     }
   }
@@ -5214,7 +5401,7 @@ class _RulesPageState extends State<RulesPage> {
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error saving rules: $e')),
+        SnackBar(content: Text(friendlyError(e))),
       );
     }
 
@@ -5494,7 +5681,7 @@ final Map<String, Future<String>> _signedUrlCache = {};
 
     try {
       final picker = ImagePicker();
-      final image = await picker.pickImage(source: source);
+      final image = await picker.pickImage(source: source, imageQuality: 85);
       if (image == null) return;
 
       final file = File(image.path);
@@ -5512,7 +5699,7 @@ final Map<String, Future<String>> _signedUrlCache = {};
    } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error sending photo: $e')),
+        SnackBar(content: Text(friendlyError(e))),
       );
     }
 
@@ -5578,7 +5765,7 @@ final Map<String, Future<String>> _signedUrlCache = {};
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error sending message: $e')),
+        SnackBar(content: Text(friendlyError(e))),
       );
     }
   }
@@ -5671,8 +5858,8 @@ final Map<String, Future<String>> _signedUrlCache = {};
                                         }
                                         return ClipRRect(
                                           borderRadius: BorderRadius.circular(12),
-                                          child: Image.network(
-                                            snapshot.data!,
+                                          child: CachedNetworkImage(
+                                            imageUrl: snapshot.data!,
                                             width: 200,
                                             fit: BoxFit.cover,
                                           ),
@@ -5823,7 +6010,7 @@ class _NotificationSettingsPageState extends State<NotificationSettingsPage> {
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error saving: $e')),
+        SnackBar(content: Text(friendlyError(e))),
       );
     }
 
@@ -6004,7 +6191,7 @@ class _ManageMembersPageState extends State<ManageMembersPage> {
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error removing member: $e')),
+        SnackBar(content: Text(friendlyError(e))),
       );
     }
   }
@@ -6055,7 +6242,7 @@ Future<void> _issueWarning(Map<String, dynamic> member) async {
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error issuing warning: $e')),
+        SnackBar(content: Text(friendlyError(e))),
       );
     }
   }
@@ -6084,7 +6271,7 @@ Future<void> _issueWarning(Map<String, dynamic> member) async {
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error changing role: $e')),
+        SnackBar(content: Text(friendlyError(e))),
       );
     }
   }
@@ -6112,7 +6299,7 @@ Future<void> _issueWarning(Map<String, dynamic> member) async {
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error changing mode: $e')),
+        SnackBar(content: Text(friendlyError(e))),
       );
     }
   }
@@ -6146,7 +6333,71 @@ Future<void> _issueWarning(Map<String, dynamic> member) async {
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error changing mode: $e')),
+        SnackBar(content: Text(friendlyError(e))),
+      );
+    }
+  }
+
+  Future<void> _transferOwnership(Map<String, dynamic> newOwner) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Transfer Ownership'),
+        content: Text(
+          'Make ${newOwner['username']} the new owner? You will become a regular '
+          'player and lose access to group settings and member management.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Transfer'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    final currentOwner = _members.firstWhere(
+      (m) => m['role'] == 'owner',
+      orElse: () => <String, dynamic>{},
+    );
+
+    if (currentOwner.isEmpty) return;
+
+    try {
+      await supabase.from('group_members').update({
+        'role': 'owner',
+        'owner_is_judge': false,
+        'judge_also_plays': false,
+      }).eq('id', newOwner['id']);
+
+      await supabase.from('group_members').update({
+        'role': 'player',
+        'owner_is_judge': false,
+        'judge_also_plays': false,
+      }).eq('id', currentOwner['id']);
+
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('${newOwner['username']} is now the owner')),
+      );
+
+      Navigator.pushAndRemoveUntil(
+        context,
+        MaterialPageRoute(builder: (_) => const HomePage()),
+        (route) => false,
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(friendlyError(e))),
       );
     }
   }
@@ -6211,6 +6462,11 @@ Future<void> _issueWarning(Map<String, dynamic> member) async {
                         : Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
+                              IconButton(
+                                icon: const FaIcon(FontAwesomeIcons.crown, color: Colors.white38, size: 18),
+                                tooltip: 'Make Owner',
+                                onPressed: () => _transferOwnership(member),
+                              ),
                               IconButton(
                                 icon: const FaIcon(FontAwesomeIcons.rightLeft, color: Colors.white70),
                                 tooltip: isJudge ? 'Make Player' : 'Make Judge',
@@ -6277,13 +6533,10 @@ class FullScreenPhotoPage extends StatelessWidget {
         child: InteractiveViewer(
           minScale: 0.5,
           maxScale: 4.0,
-          child: Image.network(
-            imageUrl,
+          child: CachedNetworkImage(
+            imageUrl: imageUrl,
             fit: BoxFit.contain,
-            loadingBuilder: (context, child, progress) {
-              if (progress == null) return child;
-              return const Center(child: CircularProgressIndicator());
-            },
+            placeholder: (context, url) => const Center(child: CircularProgressIndicator()),
           ),
         ),
       ),
@@ -6453,8 +6706,10 @@ class _ProfilePageState extends State<ProfilePage> {
                 leading: const FaIcon(FontAwesomeIcons.camera),
                 title: const Text('Take Photo'),
                 onTap: () async {
-                  final img =
-                      await picker.pickImage(source: ImageSource.camera);
+                  final img = await picker.pickImage(
+                    source: ImageSource.camera,
+                    imageQuality: 85,
+                  );
                   if (context.mounted) Navigator.pop(context, img);
                 },
               ),
@@ -6462,8 +6717,10 @@ class _ProfilePageState extends State<ProfilePage> {
                 leading: const FaIcon(FontAwesomeIcons.images),
                 title: const Text('Choose from Gallery'),
                 onTap: () async {
-                  final img =
-                      await picker.pickImage(source: ImageSource.gallery);
+                  final img = await picker.pickImage(
+                    source: ImageSource.gallery,
+                    imageQuality: 85,
+                  );
                   if (context.mounted) Navigator.pop(context, img);
                 },
               ),
@@ -6501,7 +6758,7 @@ class _ProfilePageState extends State<ProfilePage> {
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error updating photo: $e')),
+        SnackBar(content: Text(friendlyError(e))),
       );
     }
   }
@@ -6548,7 +6805,7 @@ Future<void> _showDeleteConfirmation() async {
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error deleting account: $e')),
+        SnackBar(content: Text(friendlyError(e))),
       );
     }
   }
@@ -6597,7 +6854,7 @@ Future<void> _showDeleteConfirmation() async {
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error saving profile: $e')),
+        SnackBar(content: Text(friendlyError(e))),
       );
     }
 
