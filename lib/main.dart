@@ -27,6 +27,19 @@ const supabaseAnonKey = 'sb_publishable_xDxJd7g0SvwMtQ9L-1BATQ__ql0v8Ay';
 
 final analytics = FirebaseAnalytics.instance;
 
+String roleLabel(String? role) {
+  switch (role) {
+    case 'judge':
+      return 'Judge (scores photos, doesn\'t play)';
+    case 'judge_hybrid':
+      return 'Judge who also plays';
+    case 'owner':
+      return 'Owner';
+    default:
+      return 'Player';
+  }
+}
+
 Future<void> playFeedbackSound() async {
   final prefs = await SharedPreferences.getInstance();
   if (prefs.getBool('sound_effects_enabled') ?? true) {
@@ -1033,6 +1046,7 @@ class _HomePageState extends State<HomePage> {
         title: const Text('My Nemesis'),
         actions: [
           IconButton(
+            tooltip: 'My Profile',
             onPressed: () {
               Navigator.push(
                 context,
@@ -1411,6 +1425,38 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
       _ownerIsJudge = membership?['owner_is_judge'] ?? false;
       _judgeAlsoPlays = membership?['judge_also_plays'] ?? false;
     });
+
+    _maybeShowGettingStarted();
+  }
+
+  Future<void> _maybeShowGettingStarted() async {
+    if (_myRole != 'owner') return;
+
+    final prefs = await SharedPreferences.getInstance();
+    final seenKey = 'getting_started_seen_${widget.group['id']}';
+    if (prefs.getBool(seenKey) == true) return;
+    await prefs.setBool(seenKey, true);
+
+    if (!mounted) return;
+
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('🎉 Group created!'),
+        content: const Text(
+          'Two quick things to set up:\n\n'
+          '👤 Invite your nemesis — tap the person-plus icon in the top bar.\n\n'
+          '⚖️ Decide if you\'ll judge — by default you play. You can turn on '
+          'judging for yourself from Manage Members if you\'d rather score than compete.',
+        ),
+        actions: [
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Got it'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<int> _pendingJudgingCount() async {
@@ -1445,10 +1491,10 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
     return submissions.where((s) => !scoredIds.contains(s['id'])).length;
   }
 
-  Future<bool> _hybridJudgeCanUploadNow() async {
+  Future<Map<String, dynamic>> _hybridJudgeUploadStatus() async {
     final supabase = Supabase.instance.client;
     final user = supabase.auth.currentUser;
-    if (user == null) return false;
+    if (user == null) return {'canUpload': false, 'pending': 0};
 
     final today = DateTime.now();
     final startOfDay = DateTime(today.year, today.month, today.day).toIso8601String();
@@ -1463,10 +1509,10 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
 
     // Already submitted today: nothing left to upload, so keep showing the
     // judge icon instead of a camera that would just say "already submitted."
-    if (existingSubmission != null) return false;
+    if (existingSubmission != null) return {'canUpload': false, 'pending': 0};
 
     final pending = await _pendingJudgingCount();
-    return pending == 0;
+    return {'canUpload': pending == 0, 'pending': pending};
   }
 
   Future<List<Map<String, dynamic>>> fetchMembersWithNames() async {
@@ -1956,6 +2002,73 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
     }
   }
 
+  Future<void> _pickInviteRole() async {
+    final role = await showDialog<String>(
+      context: context,
+      builder: (context) => SimpleDialog(
+        title: const Text('Invite as...'),
+        children: [
+          _inviteRoleOption(
+            context,
+            'player',
+            FontAwesomeIcons.camera,
+            'Player',
+            'Submits a photo every day',
+          ),
+          _inviteRoleOption(
+            context,
+            'judge',
+            FontAwesomeIcons.scaleBalanced,
+            'Judge',
+            'Scores photos, doesn\'t submit their own',
+          ),
+          _inviteRoleOption(
+            context,
+            'judge_hybrid',
+            FontAwesomeIcons.userGroup,
+            'Judge who also plays',
+            'Scores photos AND submits their own',
+          ),
+        ],
+      ),
+    );
+    if (role == null) return;
+    _generateInvite(role);
+  }
+
+  Widget _inviteRoleOption(
+    BuildContext context,
+    String value,
+    FaIconData icon,
+    String title,
+    String subtitle,
+  ) {
+    return SimpleDialogOption(
+      onPressed: () => Navigator.pop(context, value),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: Row(
+          children: [
+            FaIcon(icon, size: 20),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(title, style: const TextStyle(fontWeight: FontWeight.bold)),
+                  Text(
+                    subtitle,
+                    style: TextStyle(fontSize: 12, color: Colors.white.withOpacity(0.6)),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Future<void> _generateInvite(String role) async {
     final supabase = Supabase.instance.client;
     final user = supabase.auth.currentUser;
@@ -1976,7 +2089,7 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
     showDialog(
       context: context,
       builder: (_) => AlertDialog(
-        title: Text(role == 'judge' ? 'Judge Invite Code' : 'Invite Code'),
+        title: Text('Invite Code — ${roleLabel(role)}'),
         content: Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
@@ -1996,7 +2109,7 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
                 final groupName = widget.group['name'] ?? 'my group';
                 SharePlus.instance.share(
                   ShareParams(
-                    text: '🥊 Join my Nemesis group "$groupName"!\n\n'
+                    text: '🥊 Join my Nemesis group "$groupName" as a ${roleLabel(role)}!\n\n'
                         'Download My Nemesis and enter this invite code: $inviteCode',
                   ),
                 );
@@ -2070,6 +2183,33 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
           ),
         );
 
+        setState(() => _uploading = false);
+        return;
+      }
+
+      if (!mounted) return;
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('📸 Ready?'),
+          content: const Text(
+            'You\'ll take one photo right now for today\'s battle. No retakes, '
+            'no gallery picks — once you submit it, that\'s your entry for the day.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('I\'m Ready'),
+            ),
+          ],
+        ),
+      );
+
+      if (confirmed != true) {
         setState(() => _uploading = false);
         return;
       }
@@ -2225,15 +2365,28 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
             onTap: () => navigateToGroupTab(context, widget.group, 1),
           ),
           isHybridJudge
-              ? FutureBuilder<bool>(
-                  future: _hybridJudgeCanUploadNow(),
+              ? FutureBuilder<Map<String, dynamic>>(
+                  future: _hybridJudgeUploadStatus(),
                   builder: (context, snapshot) {
-                    final canUploadNow = snapshot.data ?? false;
+                    final status = snapshot.data;
+                    final canUploadNow = status?['canUpload'] as bool? ?? false;
+                    final pending = status?['pending'] as int? ?? 0;
                     return _middleActionButton(
                       showCamera: canUploadNow,
                       onTap: canUploadNow
                           ? _uploadPhoto
                           : () {
+                              if (pending > 0) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    content: Text(
+                                      pending == 1
+                                          ? 'Judge the pending photo before you can upload your own.'
+                                          : 'Judge the $pending pending photos before you can upload your own.',
+                                    ),
+                                  ),
+                                );
+                              }
                               Navigator.push(
                                 context,
                                 MaterialPageRoute(
@@ -2287,12 +2440,16 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
       appBar: AppBar(
         title: Text(groupName),
         actions: [
+          if (isOwner)
+            IconButton(
+              icon: const FaIcon(FontAwesomeIcons.userPlus),
+              tooltip: 'Invite',
+              onPressed: _pickInviteRole,
+            ),
           PopupMenuButton<String>(
             icon: const FaIcon(FontAwesomeIcons.ellipsisVertical),
             onSelected: (value) {
-              if (value == 'invite') {
-                _generateInvite('player');
-              } else if (value == 'settings') {
+              if (value == 'settings') {
                 Navigator.push(
                   context,
                   MaterialPageRoute(
@@ -2364,10 +2521,6 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
                 const PopupMenuItem(
                   value: 'manage_members',
                   child: Text('Manage Members'),
-                ),
-                const PopupMenuItem(
-                  value: 'invite',
-                  child: Text('Invite'),
                 ),
                 const PopupMenuItem(
                   value: 'settings',
@@ -2456,6 +2609,8 @@ body: RefreshIndicator(
                                   _headerChip(
                                     unread > 0 ? '💬 $unread unread' : '💬 No new messages',
                                   ),
+                                  if (widget.group['anonymous_judging'] == true)
+                                    _headerChip('🕶️ Anonymous judging'),
                                 ],
                               ),
                             ],
@@ -2820,26 +2975,60 @@ class _JoinGroupPageState extends State<JoinGroupPage> {
           .eq('invite_code', inviteCode)
           .single();
 
-  
+      final existingMembership = await supabase
+          .from('group_members')
+          .select()
+          .eq('group_id', invite['group_id'])
+          .eq('user_id', user.id)
+          .maybeSingle();
 
-final existingMembership = await supabase
-    .from('group_members')
-    .select()
-    .eq('group_id', invite['group_id'])
-    .eq('user_id', user.id)
-    .maybeSingle();
+      if (existingMembership != null) {
+        showError('You are already in this group');
+        setState(() => isLoading = false);
+        return;
+      }
 
-if (existingMembership != null) {
-  showError('You are already in this group');
-  setState(() => isLoading = false);
-  return;
-}
+      final group = await supabase
+          .from('groups')
+          .select()
+          .eq('id', invite['group_id'])
+          .single();
 
-await supabase.from('group_members').insert({
-  'group_id': invite['group_id'],
-  'user_id': user.id,
-  'role': invite['role'] ?? 'player',
-});
+      if (!mounted) return;
+
+      final rawRole = invite['role'] as String? ?? 'player';
+      final isHybrid = rawRole == 'judge_hybrid';
+      final effectiveRole = isHybrid ? 'judge' : rawRole;
+
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: Text('Join "${group['name']}"?'),
+          content: Text('You\'ll be joining as: ${roleLabel(rawRole)}'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('Join'),
+            ),
+          ],
+        ),
+      );
+
+      if (confirmed != true) {
+        setState(() => isLoading = false);
+        return;
+      }
+
+      await supabase.from('group_members').insert({
+        'group_id': invite['group_id'],
+        'user_id': user.id,
+        'role': effectiveRole,
+        if (isHybrid) 'judge_also_plays': true,
+      });
 
       if (!mounted) return;
 
@@ -2883,18 +3072,12 @@ await supabase.from('group_members').insert({
         if (!mounted) return;
       }
 
-      final joinedGroup = await supabase
-          .from('groups')
-          .select()
-          .eq('id', invite['group_id'])
-          .single();
-
       if (!mounted) return;
 
       Navigator.pushReplacement(
         context,
         MaterialPageRoute(
-          builder: (_) => GroupDashboardPage(group: joinedGroup),
+          builder: (_) => GroupDashboardPage(group: group),
         ),
         result: true,
       );
@@ -3318,12 +3501,23 @@ if (myScore == 0)
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: const Text('Disqualify Photo'),
-        content: TextField(
-          controller: reasonController,
-          decoration: const InputDecoration(
-            labelText: 'Reason',
-            hintText: 'Example: old photo, duplicate, rule violation',
-          ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'This sets their score to 0 and takes them out of the running to win today.',
+              style: TextStyle(fontSize: 13, color: Colors.white.withOpacity(0.7)),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: reasonController,
+              decoration: const InputDecoration(
+                labelText: 'Reason',
+                hintText: 'Example: old photo, duplicate, rule violation',
+              ),
+            ),
+          ],
         ),
         actions: [
           TextButton(
@@ -5316,6 +5510,8 @@ try {
         return;
       }
 
+      widget.group['anonymous_judging'] = value;
+
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Setting saved')),
       );
@@ -5782,6 +5978,22 @@ class _ScoreSliderState extends State<_ScoreSlider> {
           onChanged: _submitting
               ? null
               : (v) => setState(() => _value = v),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                '0 = worst',
+                style: TextStyle(fontSize: 11, color: Colors.white.withOpacity(0.5)),
+              ),
+              Text(
+                '10 = best',
+                style: TextStyle(fontSize: 11, color: Colors.white.withOpacity(0.5)),
+              ),
+            ],
+          ),
         ),
         const SizedBox(height: 8),
         ElevatedButton(
@@ -6967,109 +7179,137 @@ Future<void> _issueWarning(Map<String, dynamic> member) async {
     }
   }
 
+  Widget _rolesExplainer() {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Card(
+        color: Colors.white.withOpacity(0.04),
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  FaIcon(FontAwesomeIcons.circleInfo, size: 14, color: Colors.white.withOpacity(0.6)),
+                  const SizedBox(width: 8),
+                  Text(
+                    'Roles',
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 13,
+                      color: Colors.white.withOpacity(0.8),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 6),
+              Text(
+                '📸 Player — submits a photo daily\n'
+                '⚖️ Judge — scores photos, doesn\'t play\n'
+                '🎮 Judge who also plays — does both\n\n'
+                'Tap ⋮ on any member to change their role.',
+                style: TextStyle(fontSize: 12, color: Colors.white.withOpacity(0.6), height: 1.5),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _memberCard(Map<String, dynamic> member) {
+    final isOwnerRow = member['role'] == 'owner';
+    final isJudge = member['role'] == 'judge';
+    final warnings = member['warnings'] as int;
+    final judgeAlsoPlays = member['judge_also_plays'] == true;
+
+    return Card(
+      child: ListTile(
+        leading: FaIcon(roleIconData(member['role']), size: 24, color: Colors.white70),
+        title: Text(member['username'] ?? 'Unknown'),
+        subtitle: Text(
+          isOwnerRow
+              ? 'owner • '
+                  '${member['owner_is_judge'] == true ? 'judging' : 'playing'}'
+                  '${member['owner_is_judge'] == true && judgeAlsoPlays ? ' • also plays' : ''}'
+              : (isJudge
+                  ? '${member['role']}'
+                      '${judgeAlsoPlays ? ' • also plays' : ''}'
+                      '${warnings > 0 ? ' • ⚠️ $warnings warning(s)' : ''}'
+                  : member['role']),
+        ),
+        trailing: isOwnerRow
+            ? PopupMenuButton<String>(
+                icon: const FaIcon(FontAwesomeIcons.ellipsisVertical, color: Colors.white70),
+                onSelected: (value) {
+                  if (value == 'toggle_judging') {
+                    _toggleOwnerIsJudge(member, member['owner_is_judge'] != true);
+                  } else if (value == 'toggle_hybrid') {
+                    _toggleJudgeAlsoPlays(member, !judgeAlsoPlays);
+                  }
+                },
+                itemBuilder: (context) => [
+                  PopupMenuItem(
+                    value: 'toggle_judging',
+                    child: Text(member['owner_is_judge'] == true ? 'Stop Judging' : 'Start Judging'),
+                  ),
+                  if (member['owner_is_judge'] == true)
+                    PopupMenuItem(
+                      value: 'toggle_hybrid',
+                      child: Text(judgeAlsoPlays ? 'Judge only (stop playing)' : 'Also let me play'),
+                    ),
+                ],
+              )
+            : PopupMenuButton<String>(
+                icon: const FaIcon(FontAwesomeIcons.ellipsisVertical, color: Colors.white70),
+                onSelected: (value) {
+                  if (value == 'transfer') {
+                    _transferOwnership(member);
+                  } else if (value == 'make_judge') {
+                    _changeRole(member, 'judge');
+                  } else if (value == 'make_player') {
+                    _changeRole(member, 'player');
+                  } else if (value == 'toggle_hybrid') {
+                    _toggleJudgeAlsoPlays(member, !judgeAlsoPlays);
+                  } else if (value == 'warn') {
+                    _issueWarning(member);
+                  } else if (value == 'remove') {
+                    _removeMember(member);
+                  }
+                },
+                itemBuilder: (context) => [
+                  const PopupMenuItem(value: 'transfer', child: Text('Make Owner')),
+                  if (isJudge)
+                    const PopupMenuItem(value: 'make_player', child: Text('Make Player'))
+                  else
+                    const PopupMenuItem(value: 'make_judge', child: Text('Make Judge')),
+                  if (isJudge)
+                    PopupMenuItem(
+                      value: 'toggle_hybrid',
+                      child: Text(judgeAlsoPlays ? 'Judge only (stop playing)' : 'Let them also play'),
+                    ),
+                  if (isJudge)
+                    const PopupMenuItem(value: 'warn', child: Text('Issue Warning')),
+                  const PopupMenuItem(value: 'remove', child: Text('Remove from Group')),
+                ],
+              ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Manage Members')),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
-          : ListView.builder(
+          : ListView(
               padding: EdgeInsets.fromLTRB(16, 16, 16, MediaQuery.of(context).padding.bottom + 16),
-              itemCount: _members.length,
-              itemBuilder: (context, index) {
-                final member = _members[index];
-                final isOwnerRow = member['role'] == 'owner';
-
-                final isJudge = member['role'] == 'judge';
-                final warnings = member['warnings'] as int;
-
-                return Card(
-                  child: ListTile(
-                    leading: FaIcon(roleIconData(member['role']), size: 24, color: Colors.white70),
-                    title: Text(member['username'] ?? 'Unknown'),
-                    subtitle: Text(
-                      isOwnerRow
-                          ? 'owner • '
-                              '${member['owner_is_judge'] == true ? 'judging' : 'playing'}'
-                              '${member['owner_is_judge'] == true && member['judge_also_plays'] == true ? ' • also plays' : ''}'
-                          : (isJudge
-                              ? '${member['role']}'
-                                  '${member['judge_also_plays'] == true ? ' • also plays' : ''}'
-                                  '${warnings > 0 ? ' • ⚠️ $warnings warning(s)' : ''}'
-                              : member['role']),
-                    ),
-                    trailing: isOwnerRow
-                        ? Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              if (member['owner_is_judge'] == true)
-                                IconButton(
-                                  icon: FaIcon(
-                                    FontAwesomeIcons.camera,
-                                    color: member['judge_also_plays'] == true
-                                        ? const Color(0xFFE10600)
-                                        : Colors.white38,
-                                  ),
-                                  tooltip: member['judge_also_plays'] == true
-                                      ? 'Also plays (tap to make judge-only)'
-                                      : 'Judge-only (tap to also let them play)',
-                                  onPressed: () => _toggleJudgeAlsoPlays(
-                                    member,
-                                    member['judge_also_plays'] != true,
-                                  ),
-                                ),
-                              Switch(
-                                value: member['owner_is_judge'] == true,
-                                onChanged: (value) => _toggleOwnerIsJudge(member, value),
-                              ),
-                            ],
-                          )
-                        : Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              IconButton(
-                                icon: const FaIcon(FontAwesomeIcons.crown, color: Colors.white38, size: 18),
-                                tooltip: 'Make Owner',
-                                onPressed: () => _transferOwnership(member),
-                              ),
-                              IconButton(
-                                icon: const FaIcon(FontAwesomeIcons.rightLeft, color: Colors.white70),
-                                tooltip: isJudge ? 'Make Player' : 'Make Judge',
-                                onPressed: () => _changeRole(
-                                  member,
-                                  isJudge ? 'player' : 'judge',
-                                ),
-                              ),
-                              if (isJudge)
-                                IconButton(
-                                  icon: FaIcon(
-                                    FontAwesomeIcons.camera,
-                                    color: member['judge_also_plays'] == true
-                                        ? const Color(0xFFE10600)
-                                        : Colors.white38,
-                                  ),
-                                  tooltip: member['judge_also_plays'] == true
-                                      ? 'Also plays (tap to make judge-only)'
-                                      : 'Judge-only (tap to let them also play)',
-                                  onPressed: () => _toggleJudgeAlsoPlays(
-                                    member,
-                                    member['judge_also_plays'] != true,
-                                  ),
-                                ),
-                              if (isJudge)
-                                IconButton(
-                                  icon: const FaIcon(FontAwesomeIcons.triangleExclamation, color: Colors.amber),
-                                  onPressed: () => _issueWarning(member),
-                                ),
-                              IconButton(
-                                icon: const FaIcon(FontAwesomeIcons.userMinus, color: Color(0xFFE10600)),
-                                onPressed: () => _removeMember(member),
-                              ),
-                            ],
-                          ),
-                  ),
-                );
-              },
+              children: [
+                _rolesExplainer(),
+                ..._members.map(_memberCard),
+              ],
             ),
     );
   }
@@ -7726,7 +7966,7 @@ class _OnboardingPageState extends State<OnboardingPage> {
       'title': 'Ready to battle?',
       'subtitle': 'Create a group and invite your nemesis',
       'description':
-          'Own a group as the creator, invite players and a judge, and let the battle begin.',
+          'Everyone in a group has a role:\n\n📸  Players submit a photo\n\n⚖️  Judges score photos, but don\'t play\n\n🎮  A judge can also play if you want\n\nYou pick each person\'s role when you invite them.',
       'color': Color(0xFFE10600),
     },
   ];
