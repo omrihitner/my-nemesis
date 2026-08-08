@@ -3,6 +3,7 @@ import 'dart:math';
 import 'dart:ui';
 import 'package:image_picker/image_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:table_calendar/table_calendar.dart';
 import 'package:video_player/video_player.dart';
@@ -16,15 +17,103 @@ import 'package:google_sign_in/google_sign_in.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:firebase_crashlytics/firebase_crashlytics.dart';
+import 'package:firebase_analytics/firebase_analytics.dart';
+import 'package:confetti/confetti.dart';
+import 'package:in_app_review/in_app_review.dart';
+import 'package:share_plus/share_plus.dart';
 
 const supabaseUrl = 'https://pwlidahqnfczjgqikzzy.supabase.co';
 const supabaseAnonKey = 'sb_publishable_xDxJd7g0SvwMtQ9L-1BATQ__ql0v8Ay';
+
+final analytics = FirebaseAnalytics.instance;
+
+Future<void> playFeedbackSound() async {
+  final prefs = await SharedPreferences.getInstance();
+  if (prefs.getBool('sound_effects_enabled') ?? true) {
+    SystemSound.play(SystemSoundType.click);
+  }
+}
+
+Future<void> maybeRequestReview() async {
+  final prefs = await SharedPreferences.getInstance();
+  if (prefs.getBool('review_prompted') == true) return;
+  await prefs.setBool('review_prompted', true);
+
+  final inAppReview = InAppReview.instance;
+  if (await inAppReview.isAvailable()) {
+    inAppReview.requestReview();
+  }
+}
+
+const _kStreakMilestones = [3, 7, 14, 30];
+const _kWinMilestones = [1, 5, 10, 25, 50];
+
+Future<void> checkAchievementMilestones(BuildContext context, Map<String, int> stats) async {
+  final prefs = await SharedPreferences.getInstance();
+
+  final bestStreak = prefs.getInt('ach_best_streak') ?? 0;
+  final bestWins = prefs.getInt('ach_best_wins') ?? 0;
+  final longestStreak = stats['longestStreak'] ?? 0;
+  final totalWins = stats['totalWins'] ?? 0;
+
+  String? unlockedTitle;
+  String unlockedEmoji = '🏅';
+
+  for (final m in _kStreakMilestones.reversed) {
+    if (longestStreak >= m && bestStreak < m) {
+      unlockedTitle = '$m-Day Streak';
+      unlockedEmoji = '🔥';
+      break;
+    }
+  }
+
+  if (unlockedTitle == null) {
+    for (final m in _kWinMilestones.reversed) {
+      if (totalWins >= m && bestWins < m) {
+        unlockedTitle = m == 1 ? 'First Win' : '$m Wins';
+        unlockedEmoji = '🏆';
+        break;
+      }
+    }
+  }
+
+  if (longestStreak > bestStreak) await prefs.setInt('ach_best_streak', longestStreak);
+  if (totalWins > bestWins) await prefs.setInt('ach_best_wins', totalWins);
+
+  if (unlockedTitle == null) return;
+  if (!context.mounted) return;
+
+  HapticFeedback.mediumImpact();
+  playFeedbackSound();
+  analytics.logEvent(name: 'achievement_unlocked', parameters: {'achievement': unlockedTitle});
+
+  showDialog(
+    context: context,
+    builder: (_) => AlertDialog(
+      backgroundColor: const Color(0xFF1A1A1A),
+      title: Text('$unlockedEmoji Achievement Unlocked!', textAlign: TextAlign.center),
+      content: Text(
+        unlockedTitle!,
+        textAlign: TextAlign.center,
+        style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+      ),
+      actionsAlignment: MainAxisAlignment.center,
+      actions: [
+        ElevatedButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Nice!'),
+        ),
+      ],
+    ),
+  );
+}
 
 Future<void> sendNotification({
   required String type,
   required String groupId,
   required String senderId,
   required String senderName,
+  String? photoPath,
 }) async {
   try {
     await Supabase.instance.client.functions.invoke(
@@ -34,6 +123,7 @@ Future<void> sendNotification({
         'groupId': groupId,
         'senderId': senderId,
         'senderName': senderName,
+        if (photoPath != null) 'photoPath': photoPath,
       },
     );
   } catch (_) {}
@@ -834,7 +924,8 @@ class _HomePageState extends State<HomePage> {
     final backgroundPhotoPath = group['background_photo_url'] as String?;
     final groupId = group['id'] as String;
 
-    Widget cardContent(String? signedUrl, Map<String, dynamic>? leader, int unread) {
+    Widget cardContent(String? signedUrl, Map<String, dynamic>? leader, int unread, int myStreak) {
+      final plain = signedUrl == null && backgroundColorHex == null;
       final baseColor = backgroundColorHex != null
           ? hexToColor(backgroundColorHex)
           : const Color(0xFF1E1E1E);
@@ -844,7 +935,14 @@ class _HomePageState extends State<HomePage> {
         height: 88,
         clipBehavior: Clip.antiAlias,
         decoration: BoxDecoration(
-          color: baseColor,
+          color: plain ? null : baseColor,
+          gradient: plain
+              ? const LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [Color(0xFF2A2A2A), Color(0xFF161616)],
+                )
+              : null,
           borderRadius: BorderRadius.circular(14),
         ),
         child: Material(
@@ -889,6 +987,7 @@ class _HomePageState extends State<HomePage> {
                               children: [
                                 if (leader != null)
                                   _groupCardChip('🏆 ${leader['name']} · ${leader['score']}'),
+                                if (myStreak > 0) _groupCardChip('🔥 $myStreak'),
                                 _groupCardChip(unread > 0 ? '💬 $unread' : '💬 0'),
                               ],
                             ),
@@ -913,21 +1012,22 @@ class _HomePageState extends State<HomePage> {
             : Future.value(null),
         fetchGroupLeader(groupId),
         fetchGroupUnreadCount(groupId),
+        fetchGroupStreaks(groupId),
       ]),
       builder: (context, snapshot) {
         final results = snapshot.data;
         final signedUrl = results?[0] as String?;
         final leader = results?[1] as Map<String, dynamic>?;
         final unread = results?[2] as int? ?? 0;
-        return cardContent(signedUrl, leader, unread);
+        final streaks = results?[3] as Map<String, int>? ?? {};
+        final myStreak = streaks[supabase.auth.currentUser?.id] ?? 0;
+        return cardContent(signedUrl, leader, unread, myStreak);
       },
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    final email = supabase.auth.currentUser?.email ?? '';
-
     return Scaffold(
       appBar: AppBar(
         title: const Text('My Nemesis'),
@@ -941,16 +1041,30 @@ class _HomePageState extends State<HomePage> {
             },
             icon: const FaIcon(FontAwesomeIcons.userCircle),
           ),
-          IconButton(
-            onPressed: () async {
-              await logout();
-              if (!context.mounted) return;
-              Navigator.pushReplacement(
-                context,
-                MaterialPageRoute(builder: (_) => const LoginPage()),
-              );
+          PopupMenuButton<String>(
+            icon: const FaIcon(FontAwesomeIcons.ellipsisVertical),
+            onSelected: (value) async {
+              if (value == 'logout') {
+                await logout();
+                if (!context.mounted) return;
+                Navigator.pushReplacement(
+                  context,
+                  MaterialPageRoute(builder: (_) => const LoginPage()),
+                );
+              }
             },
-            icon: const FaIcon(FontAwesomeIcons.signOut),
+            itemBuilder: (context) => [
+              const PopupMenuItem(
+                value: 'logout',
+                child: Row(
+                  children: [
+                    FaIcon(FontAwesomeIcons.signOut, size: 16),
+                    SizedBox(width: 10),
+                    Text('Logout'),
+                  ],
+                ),
+              ),
+            ],
           ),
         ],
       ),
@@ -963,70 +1077,66 @@ class _HomePageState extends State<HomePage> {
             final isLoading =
                 snapshot.connectionState == ConnectionState.waiting;
 
-            return Column(
+            return ListView(
+              padding: EdgeInsets.fromLTRB(
+                  20, 20, 20, MediaQuery.of(context).padding.bottom + 90),
               children: [
-                Expanded(
-                  child: ListView(
-                    padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
-                    children: [
-                      if (isLoading)
-                        const Center(child: CircularProgressIndicator())
-                      else if (snapshot.hasError)
-                        Center(child: Text('Error: ${snapshot.error}'))
-                      else if (groups.isEmpty)
-                        const _EmptyState(
-                          icon: FontAwesomeIcons.usersSlash,
-                          title: 'No groups yet',
-                          subtitle:
-                              'Create your first group or join one with an invite code.',
-                        )
-                      else
-                        ...groups.map((group) => _buildGroupCard(group)),
-                    ],
-                  ),
-                ),
-                Padding(
-                  padding: EdgeInsets.fromLTRB(
-                      20, 0, 20, MediaQuery.of(context).padding.bottom + 20),
-                  child: Column(
-                    children: [
-                      SizedBox(
-                        width: double.infinity,
-                        child: ElevatedButton(
-                          onPressed: () async {
-                            final created = await Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (_) => const CreateGroupPage(),
-                              ),
-                            );
-                            if (created == true) setState(() {});
-                          },
-                          child: const Text('Create Group'),
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      SizedBox(
-                        width: double.infinity,
-                        child: ElevatedButton(
-                          onPressed: () async {
-                            final joined = await Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (_) => const JoinGroupPage(),
-                              ),
-                            );
-                            if (joined == true) setState(() {});
-                          },
-                          child: const Text('Join Group'),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
+                if (isLoading)
+                  const Center(child: CircularProgressIndicator())
+                else if (snapshot.hasError)
+                  Center(child: Text('Error: ${snapshot.error}'))
+                else if (groups.isEmpty)
+                  const _EmptyState(
+                    icon: FontAwesomeIcons.usersSlash,
+                    title: 'No groups yet',
+                    subtitle:
+                        'Create your first group or join one with an invite code.',
+                  )
+                else
+                  ...groups.map((group) => _buildGroupCard(group)),
               ],
             );
           },
+        ),
+      ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: () => _showCreateJoinSheet(context),
+        child: const FaIcon(FontAwesomeIcons.plus),
+      ),
+    );
+  }
+
+  void _showCreateJoinSheet(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      builder: (context) => SafeArea(
+        child: Wrap(
+          children: [
+            ListTile(
+              leading: const FaIcon(FontAwesomeIcons.plus),
+              title: const Text('Create Group'),
+              onTap: () async {
+                Navigator.pop(context);
+                final created = await Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => const CreateGroupPage()),
+                );
+                if (created == true) setState(() {});
+              },
+            ),
+            ListTile(
+              leading: const FaIcon(FontAwesomeIcons.rightToBracket),
+              title: const Text('Join Group'),
+              onTap: () async {
+                Navigator.pop(context);
+                final joined = await Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => const JoinGroupPage()),
+                );
+                if (joined == true) setState(() {});
+              },
+            ),
+          ],
         ),
       ),
     );
@@ -1093,6 +1203,8 @@ class _CreateGroupPageState extends State<CreateGroupPage> {
       });
 
       if (!mounted) return;
+
+      analytics.logEvent(name: 'group_created');
 
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Group created')),
@@ -1174,6 +1286,76 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
     super.initState();
     _loadMyRole();
     _maybeShowChallengePopup();
+    _maybeShowWinCelebration();
+  }
+
+  Future<void> _maybeShowWinCelebration() async {
+    final supabase = Supabase.instance.client;
+    final user = supabase.auth.currentUser;
+    if (user == null) return;
+
+    final today = DateTime.now();
+    final startOfDay = DateTime(today.year, today.month, today.day);
+    final endOfDay = startOfDay.add(const Duration(days: 1));
+
+    final submissions = await supabase
+        .from('submissions')
+        .select()
+        .eq('group_id', widget.group['id'])
+        .gte('submitted_at', startOfDay.toIso8601String())
+        .lt('submitted_at', endOfDay.toIso8601String());
+
+    if (submissions.isEmpty) return;
+
+    final submissionIds = submissions.map((s) => s['id']).toList();
+    final scores = await supabase
+        .from('scores')
+        .select()
+        .inFilter('submission_id', submissionIds);
+
+    final scoredSubmissionIds = scores.map((s) => s['submission_id']).toSet();
+    final allJudged = submissions.every((s) => scoredSubmissionIds.contains(s['id']));
+    if (!allJudged) return;
+
+    final totals = <String, int>{};
+    final submittedTimes = <String, String>{};
+    for (final submission in submissions) {
+      final userId = submission['user_id'] as String;
+      submittedTimes[userId] = submission['submitted_at'].toString();
+      final subScores = scores.where((s) => s['submission_id'] == submission['id']);
+      for (final score in subScores) {
+        totals[userId] = (totals[userId] ?? 0) + ((score['score'] ?? 0) as int);
+      }
+    }
+
+    if (totals.isEmpty) return;
+
+    final maxScore = totals.values.reduce((a, b) => a > b ? a : b);
+    final topUserIds = totals.entries
+        .where((e) => e.value == maxScore)
+        .map((e) => e.key)
+        .toList()
+      ..sort((a, b) => submittedTimes[a]!.compareTo(submittedTimes[b]!));
+    final winnerId = topUserIds.first;
+
+    if (winnerId != user.id) return;
+
+    final prefs = await SharedPreferences.getInstance();
+    final todayKey = '${today.year}-${today.month}-${today.day}';
+    final seenKey = 'win_celebrated_${widget.group['id']}_$todayKey';
+    if (prefs.getBool(seenKey) == true) return;
+    await prefs.setBool(seenKey, true);
+
+    if (!mounted) return;
+
+    HapticFeedback.mediumImpact();
+    playFeedbackSound();
+    analytics.logEvent(name: 'battle_won');
+
+    showDialog(
+      context: context,
+      builder: (_) => _WinCelebrationDialog(score: maxScore),
+    );
   }
 
   Future<void> _maybeShowChallengePopup() async {
@@ -1436,7 +1618,13 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
       notices.add({'text': '🎯 Today\'s Challenge: $text'});
     }
 
-    final names = await _checkNewUploads();
+    final results = await Future.wait([
+      _checkNewUploads(),
+      _myWarningStatus(),
+      _checkPendingJudging(),
+    ]);
+
+    final names = results[0] as List<String>;
     if (names.isNotEmpty) {
       final text = names.length == 1
           ? '📸 ${names.first} just uploaded their photo!'
@@ -1444,8 +1632,8 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
       notices.add({'text': text});
     }
 
-    final warningStatus = await _myWarningStatus();
-    if (warningStatus != null && (warningStatus['unseen'] ?? 0) > 0) {
+    final warningStatus = results[1] as Map<String, int>;
+    if ((warningStatus['unseen'] ?? 0) > 0) {
       final total = warningStatus['total']!;
       notices.add({
         'text': total == 1
@@ -1455,7 +1643,7 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
       });
     }
 
-    final pending = await _checkPendingJudging();
+    final pending = results[2] as int;
     if (pending > 0) {
       notices.add({
         'text': pending == 1
@@ -1802,6 +1990,18 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
                 );
               },
             ),
+            IconButton(
+              icon: const FaIcon(FontAwesomeIcons.shareNodes, size: 20),
+              onPressed: () {
+                final groupName = widget.group['name'] ?? 'my group';
+                SharePlus.instance.share(
+                  ShareParams(
+                    text: '🥊 Join my Nemesis group "$groupName"!\n\n'
+                        'Download My Nemesis and enter this invite code: $inviteCode',
+                  ),
+                );
+              },
+            ),
           ],
         ),
         actions: [
@@ -1914,11 +2114,14 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
         groupId: widget.group['id'],
         senderId: user.id,
         senderName: userProfile['username'] ?? 'Someone',
+        photoPath: filePath,
       );
 
       if (!mounted) return;
 
       HapticFeedback.mediumImpact();
+      playFeedbackSound();
+      analytics.logEvent(name: 'photo_submitted');
 
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -2518,6 +2721,69 @@ body: RefreshIndicator(
     );
   }
 }
+class _WinCelebrationDialog extends StatefulWidget {
+  final int score;
+
+  const _WinCelebrationDialog({required this.score});
+
+  @override
+  State<_WinCelebrationDialog> createState() => _WinCelebrationDialogState();
+}
+
+class _WinCelebrationDialogState extends State<_WinCelebrationDialog> {
+  late final ConfettiController _confettiController;
+
+  @override
+  void initState() {
+    super.initState();
+    _confettiController = ConfettiController(duration: const Duration(seconds: 2));
+    _confettiController.play();
+  }
+
+  @override
+  void dispose() {
+    _confettiController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      alignment: Alignment.topCenter,
+      children: [
+        ConfettiWidget(
+          confettiController: _confettiController,
+          blastDirectionality: BlastDirectionality.explosive,
+          shouldLoop: false,
+          numberOfParticles: 30,
+          maxBlastForce: 20,
+          minBlastForce: 8,
+          gravity: 0.3,
+          colors: const [Color(0xFFE10600), Colors.white, Colors.amber, Colors.greenAccent],
+        ),
+        AlertDialog(
+          backgroundColor: const Color(0xFF1A1A1A),
+          title: const Text('🏆 You Won Today!', textAlign: TextAlign.center),
+          content: Text(
+            'Your photo scored ${widget.score} points — best of the day. Nice one!',
+            textAlign: TextAlign.center,
+          ),
+          actionsAlignment: MainAxisAlignment.center,
+          actions: [
+            ElevatedButton(
+              onPressed: () {
+                Navigator.pop(context);
+                maybeRequestReview();
+              },
+              child: const Text('Nice!'),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
 class JoinGroupPage extends StatefulWidget {
   const JoinGroupPage({super.key});
 
@@ -2576,6 +2842,8 @@ await supabase.from('group_members').insert({
 });
 
       if (!mounted) return;
+
+      analytics.logEvent(name: 'group_joined');
 
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Joined group')),
@@ -2757,18 +3025,30 @@ final groupData = await supabase
         .lt('submitted_at', endOfDay.toIso8601String())
         .order('submitted_at', ascending: false);
 
+    final submissionIds = submissions.map((s) => s['id']).toList();
+    final allJudgeScores = submissionIds.isEmpty
+        ? <dynamic>[]
+        : await supabase
+            .from('scores')
+            .select()
+            .eq('judge_id', judge!.id)
+            .inFilter('submission_id', submissionIds);
+
+    final signedUrls = await Future.wait(
+      submissions.map(
+        (s) => supabase.storage.from('Photos').createSignedUrl(s['photo_url'], 60 * 60),
+      ),
+    );
+
     final result = <Map<String, dynamic>>[];
 
-    for (final submission in submissions) {
-      final signedUrl = await supabase.storage
-          .from('Photos')
-          .createSignedUrl(submission['photo_url'], 60 * 60);
+    for (var i = 0; i < submissions.length; i++) {
+      final submission = submissions[i];
+      final signedUrl = signedUrls[i];
 
-      final existingScores = await supabase
-          .from('scores')
-          .select()
-          .eq('submission_id', submission['id'])
-          .eq('judge_id', judge!.id);
+      final existingScores = allJudgeScores
+          .where((s) => s['submission_id'] == submission['id'])
+          .toList();
 
     final uploader = users.firstWhere(
         (u) => u['id'] == submission['user_id'],
@@ -2780,7 +3060,6 @@ final groupData = await supabase
         'user_id': submission['user_id'],
         'username': anonymousJudging ? null : uploader['username'],
         'photo_url': submission['photo_url'],
-        'signed_url': signedUrl,
         'signed_url': signedUrl,
         'my_score': existingScores.isNotEmpty ? existingScores.first['score'] : null,
 'my_disqualified': existingScores.isNotEmpty
@@ -2809,6 +3088,7 @@ Future<void> saveScore(String submissionId, int score) async {
     });
 
     HapticFeedback.lightImpact();
+    playFeedbackSound();
 
     // Notify the photo owner
     final submission = await supabase
@@ -2914,11 +3194,14 @@ Future<void> saveScore(String submissionId, int score) async {
                       },
                       child: Stack(
                         children: [
-                          CachedNetworkImage(
-                            imageUrl: submission['signed_url'],
-                            height: 300,
-                            fit: BoxFit.cover,
-                            width: double.infinity,
+                          Hero(
+                            tag: submission['signed_url'],
+                            child: CachedNetworkImage(
+                              imageUrl: submission['signed_url'],
+                              height: 300,
+                              fit: BoxFit.cover,
+                              width: double.infinity,
+                            ),
                           ),
                           Positioned(
                             bottom: 8,
@@ -3170,12 +3453,17 @@ class TodayPhotosPage extends StatelessWidget {
     final users = await supabase.from('users').select();
     final scores = await supabase.from('scores').select();
 
+    final signedUrls = await Future.wait(
+      submissions.map(
+        (s) => supabase.storage.from('Photos').createSignedUrl(s['photo_url'], 60 * 60),
+      ),
+    );
+
     final result = <Map<String, dynamic>>[];
 
-    for (final submission in submissions) {
-      final signedUrl = await supabase.storage
-          .from('Photos')
-          .createSignedUrl(submission['photo_url'], 60 * 60);
+    for (var i = 0; i < submissions.length; i++) {
+      final submission = submissions[i];
+      final signedUrl = signedUrls[i];
 
       final uploader = users.firstWhere(
         (u) => u['id'] == submission['user_id'],
@@ -3250,8 +3538,8 @@ class TodayPhotosPage extends StatelessWidget {
             );
           }
 
-          return Padding(
-            padding: const EdgeInsets.all(16),
+          return SingleChildScrollView(
+            padding: EdgeInsets.fromLTRB(16, 16, 16, MediaQuery.of(context).padding.bottom + 16),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -3269,6 +3557,24 @@ class TodayPhotosPage extends StatelessWidget {
     );
   }
 }
+class _AnimatedCount extends StatelessWidget {
+  final int value;
+  final TextStyle? style;
+  final String suffix;
+
+  const _AnimatedCount({required this.value, this.style, this.suffix = ''});
+
+  @override
+  Widget build(BuildContext context) {
+    return TweenAnimationBuilder<int>(
+      tween: IntTween(begin: 0, end: value),
+      duration: const Duration(milliseconds: 800),
+      curve: Curves.easeOutCubic,
+      builder: (context, val, child) => Text('$val$suffix', style: style),
+    );
+  }
+}
+
 class LeaderboardPage extends StatelessWidget {
   final dynamic group;
 
@@ -3386,8 +3692,9 @@ return ListView(
           style: TextStyle(fontWeight: FontWeight.bold),
         ),
         subtitle: Text(winner['username']),
-        trailing: Text(
-          '${winner['total_score']} pts',
+        trailing: _AnimatedCount(
+          value: winner['total_score'] as int,
+          suffix: ' pts',
           style: const TextStyle(
             fontSize: 18,
             fontWeight: FontWeight.bold,
@@ -3427,8 +3734,9 @@ return ListView(
           subtitle: Text(
             (row['streak'] ?? 0) > 0 ? '${row['role']} • 🔥 ${row['streak']}' : row['role'],
           ),
-          trailing: Text(
-            '${row['total_score']} pts',
+          trailing: _AnimatedCount(
+            value: row['total_score'] as int,
+            suffix: ' pts',
             style: const TextStyle(
               fontSize: 18,
               fontWeight: FontWeight.bold,
@@ -3581,7 +3889,7 @@ class WeeklyRecapPage extends StatelessWidget {
           }
 
           return ListView(
-            padding: const EdgeInsets.all(16),
+            padding: EdgeInsets.fromLTRB(16, 16, 16, MediaQuery.of(context).padding.bottom + 16),
             children: [
               Text(
                 'Week of ${fmt(startOfWeek)} – ${fmt(endOfWeek)}',
@@ -3653,12 +3961,17 @@ Future<List<Map<String, dynamic>>> fetchBattlePhotos() async {
   final users = await supabase.from('users').select();
   final scores = await supabase.from('scores').select();
 
+  final signedUrls = await Future.wait(
+    submissions.map(
+      (s) => supabase.storage.from('Photos').createSignedUrl(s['photo_url'], 60 * 60),
+    ),
+  );
+
   final result = <Map<String, dynamic>>[];
 
-  for (final submission in submissions) {
-    final signedUrl = await supabase.storage
-        .from('Photos')
-        .createSignedUrl(submission['photo_url'], 60 * 60);
+  for (var i = 0; i < submissions.length; i++) {
+    final submission = submissions[i];
+    final signedUrl = signedUrls[i];
 
     final user = users.firstWhere(
       (u) => u['id'] == submission['user_id'],
@@ -3715,111 +4028,209 @@ result.add({
         title: const Text('Battle Details'),
       ),
 body: SingleChildScrollView(
-  child: Padding(
-    padding: const EdgeInsets.all(20),
-    child: Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: [
-      Text(
-        '🏆 Winner: ${item['winner']}',
-        style: const TextStyle(
-          fontSize: 24,
-          fontWeight: FontWeight.bold,
-        ),
-      ),
+  padding: EdgeInsets.fromLTRB(20, 20, 20, MediaQuery.of(context).padding.bottom + 20),
+  child: FutureBuilder<List<Map<String, dynamic>>>(
+    future: fetchBattlePhotos(),
+    builder: (context, snapshot) {
+      if (snapshot.connectionState == ConnectionState.waiting) {
+        return const Center(child: CircularProgressIndicator());
+      }
 
-      const SizedBox(height: 12),
+      if (snapshot.hasError) {
+        return Center(child: Text('Error: ${snapshot.error}'));
+      }
 
-Text(
-  (() {
-    final date = DateTime.parse(item['date']);
+      final photos = snapshot.data ?? [];
+      final maxScore = photos.isEmpty
+          ? 0
+          : photos
+              .map((p) => p['total_score'] as int)
+              .reduce((a, b) => a > b ? a : b);
 
-    const months = [
-      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
-    ];
+      const List<Color> palette = [
+        Colors.redAccent,
+        Colors.blueAccent,
+        Colors.greenAccent,
+        Colors.purpleAccent,
+        Colors.orangeAccent,
+        Colors.tealAccent,
+        Colors.pinkAccent,
+        Colors.amberAccent,
+      ];
 
-    return '📅 ${date.day} ${months[date.month - 1]} ${date.year}';
-  })(),
-  style: const TextStyle(fontSize: 16),
-),
-const SizedBox(height: 16),
+      const months = [
+        'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+        'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+      ];
+      final date = DateTime.parse(item['date']);
+      final dateLabel = '${date.day} ${months[date.month - 1]} ${date.year}';
 
-FutureBuilder<List<Map<String, dynamic>>>(
-  future: fetchBattlePhotos(),
-  builder: (context, snapshot) {
-    final photos = snapshot.data ?? [];
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  Colors.amber.withOpacity(0.25),
+                  Colors.amber.withOpacity(0.05),
+                ],
+              ),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: Colors.amber.withOpacity(0.4)),
+            ),
+            child: Row(
+              children: [
+                Container(
+                  width: 56,
+                  height: 56,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: Colors.amber.withOpacity(0.2),
+                    shape: BoxShape.circle,
+                  ),
+                  child: const FaIcon(FontAwesomeIcons.trophy, color: Colors.amber, size: 26),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        item['winner'],
+                        style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+                      ),
+                      const SizedBox(height: 6),
+                      Row(
+                        children: [
+                          FaIcon(
+                            FontAwesomeIcons.calendarDays,
+                            size: 13,
+                            color: Colors.white.withOpacity(0.6),
+                          ),
+                          const SizedBox(width: 6),
+                          Text(
+                            dateLabel,
+                            style: TextStyle(fontSize: 13, color: Colors.white.withOpacity(0.6)),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
 
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              '⚔️ Battle Summary',
-              style: TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.bold,
+          const SizedBox(height: 20),
+
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Row(
+                    children: [
+                      FaIcon(FontAwesomeIcons.chartSimple, size: 16),
+                      SizedBox(width: 8),
+                      Text(
+                        'Battle Summary',
+                        style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  if (photos.isEmpty)
+                    const Text('No scores yet')
+                  else
+                    ...photos.asMap().entries.map((entry) {
+                      final index = entry.key;
+                      final photo = entry.value;
+                      final color = palette[index % palette.length];
+                      final isWinner = photo['username'] == item['winner'];
+                      final score = photo['total_score'] as int;
+                      final ratio = maxScore == 0 ? 0.0 : score / maxScore;
+
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 12),
+                        child: Row(
+                          children: [
+                            _MemberAvatar(
+                              username: photo['username'] ?? '?',
+                              color: color,
+                              size: 32,
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Row(
+                                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                    children: [
+                                      Text(
+                                        photo['username'] ?? 'Unknown',
+                                        style: TextStyle(
+                                          fontWeight: isWinner ? FontWeight.bold : FontWeight.normal,
+                                          color: isWinner ? Colors.amber : Colors.white,
+                                        ),
+                                      ),
+                                      Text(
+                                        '$score pts',
+                                        style: const TextStyle(fontWeight: FontWeight.bold),
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 6),
+                                  ClipRRect(
+                                    borderRadius: BorderRadius.circular(4),
+                                    child: LinearProgressIndicator(
+                                      value: ratio,
+                                      minHeight: 6,
+                                      backgroundColor: Colors.white.withOpacity(0.08),
+                                      valueColor: AlwaysStoppedAnimation(
+                                        isWinner ? Colors.amber : color,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      );
+                    }),
+                ],
               ),
             ),
+          ),
 
-            const SizedBox(height: 8),
+          const SizedBox(height: 24),
 
-            if (photos.isEmpty)
-              const Text('No scores yet')
-            else
-              ...photos.map((photo) {
-                return Text(
-                  '${photo['username']}: ${photo['total_score']} pts',
-                );
-              }),
-          ],
-        ),
-      ),
-    );
-  },
-),
-const SizedBox(height: 24),
-
-FutureBuilder<List<Map<String, dynamic>>>(
-  future: fetchBattlePhotos(),
-  builder: (context, snapshot) {
-    if (snapshot.connectionState == ConnectionState.waiting) {
-      return const Center(child: CircularProgressIndicator());
-    }
-
-    if (snapshot.hasError) {
-      return Text('Photo error: ${snapshot.error}');
-    }
-
-    final photos = snapshot.data ?? [];
-
-    if (photos.isEmpty) {
-      return const Text('No photos for this day');
-    }
-
-return Column(
-  crossAxisAlignment: CrossAxisAlignment.start,
-  children: [
-    Text(
-      '📸 Photos submitted: ${photos.length}',
-      style: const TextStyle(
-        fontSize: 18,
-        fontWeight: FontWeight.bold,
-      ),
-    ),
-
-    const SizedBox(height: 12),
-
-    _PhotoCarousel(photos: photos),
-  ],
-);
-  },
-),
-    ],
+          Row(
+            children: [
+              const FaIcon(FontAwesomeIcons.camera, size: 16),
+              const SizedBox(width: 8),
+              Text(
+                'Photos submitted: ${photos.length}',
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          if (photos.isEmpty)
+            const Text('No photos for this day')
+          else
+            _PhotoCarousel(photos: photos),
+        ],
+      );
+    },
   ),
-),
 ),
     );
   }
@@ -3844,7 +4255,7 @@ class _PhotoCarouselState extends State<_PhotoCarousel> {
     super.dispose();
   }
 
-  Widget _scoreChip(String label, Color color) {
+  Widget _scoreChip(FaIconData icon, String label, Color color) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       decoration: BoxDecoration(
@@ -3852,9 +4263,16 @@ class _PhotoCarouselState extends State<_PhotoCarousel> {
         borderRadius: BorderRadius.circular(12),
         border: Border.all(color: color.withOpacity(0.5)),
       ),
-      child: Text(
-        label,
-        style: TextStyle(color: color, fontWeight: FontWeight.bold, fontSize: 14),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          FaIcon(icon, size: 14, color: color),
+          const SizedBox(width: 6),
+          Text(
+            label,
+            style: TextStyle(color: color, fontWeight: FontWeight.bold, fontSize: 14),
+          ),
+        ],
       ),
     );
   }
@@ -3909,11 +4327,14 @@ class _PhotoCarouselState extends State<_PhotoCarousel> {
                             children: [
                               ClipRRect(
                                 borderRadius: BorderRadius.circular(12),
-                                child: CachedNetworkImage(
-                                  imageUrl: photo['signed_url'],
-                                  height: 240,
-                                  width: double.infinity,
-                                  fit: BoxFit.cover,
+                                child: Hero(
+                                  tag: photo['signed_url'],
+                                  child: CachedNetworkImage(
+                                    imageUrl: photo['signed_url'],
+                                    height: 240,
+                                    width: double.infinity,
+                                    fit: BoxFit.cover,
+                                  ),
                                 ),
                               ),
                               Positioned(
@@ -3933,27 +4354,67 @@ class _PhotoCarouselState extends State<_PhotoCarousel> {
                         ),
                         const SizedBox(height: 12),
                         if (photo['is_disqualified'] == true) ...[
-                          _scoreChip('🚫 Disqualified', Colors.redAccent),
+                          _scoreChip(FontAwesomeIcons.ban, 'Disqualified', Colors.redAccent),
                           const SizedBox(height: 6),
                           Text(
                             photo['disqualification_reason'] ?? 'No reason provided',
                             style: const TextStyle(fontSize: 14),
                           ),
                         ] else
-                          _scoreChip('⭐ Total Score: ${photo['total_score']}', Colors.greenAccent),
+                          _scoreChip(
+                            FontAwesomeIcons.star,
+                            'Total Score: ${photo['total_score']}',
+                            Colors.greenAccent,
+                          ),
                         const SizedBox(height: 12),
-                        const Text(
-                          'Judge Breakdown',
-                          style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+                        const Row(
+                          children: [
+                            FaIcon(FontAwesomeIcons.scaleBalanced, size: 14),
+                            SizedBox(width: 8),
+                            Text(
+                              'Judge Breakdown',
+                              style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+                            ),
+                          ],
                         ),
-                        const SizedBox(height: 4),
-                        ...judgeDetails.map((judge) {
-                          final text = judge['disqualified'] == true
-                              ? '⚖️ ${judge['judge_name']}: 🚫 Disqualified — ${judge['reason'] ?? 'No reason'}'
-                              : '⚖️ ${judge['judge_name']}: ⭐ ${judge['score']}';
+                        const SizedBox(height: 8),
+                        ...judgeDetails.asMap().entries.map((entry) {
+                          final judge = entry.value;
+                          final disqualified = judge['disqualified'] == true;
                           return Padding(
-                            padding: const EdgeInsets.only(bottom: 2),
-                            child: Text(text),
+                            padding: const EdgeInsets.only(bottom: 8),
+                            child: Row(
+                              children: [
+                                _MemberAvatar(
+                                  username: judge['judge_name'] ?? '?',
+                                  color: Colors.blueGrey,
+                                  size: 28,
+                                ),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: Text(
+                                    judge['judge_name'] ?? 'Unknown Judge',
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                                if (disqualified)
+                                  Text(
+                                    'DQ — ${judge['reason'] ?? 'No reason'}',
+                                    style: const TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold),
+                                  )
+                                else
+                                  Row(
+                                    children: [
+                                      const FaIcon(FontAwesomeIcons.star, size: 13, color: Colors.amber),
+                                      const SizedBox(width: 4),
+                                      Text(
+                                        '${judge['score']}',
+                                        style: const TextStyle(fontWeight: FontWeight.bold),
+                                      ),
+                                    ],
+                                  ),
+                              ],
+                            ),
                           );
                         }),
                       ],
@@ -4554,6 +5015,102 @@ Widget _dayCell(
     );
   }
 }
+class _PhotoCropPage extends StatefulWidget {
+  final File imageFile;
+  final double aspectRatio;
+
+  const _PhotoCropPage({required this.imageFile, this.aspectRatio = 2.4});
+
+  @override
+  State<_PhotoCropPage> createState() => _PhotoCropPageState();
+}
+
+class _PhotoCropPageState extends State<_PhotoCropPage> {
+  final _repaintKey = GlobalKey();
+  final _transformController = TransformationController();
+  bool _capturing = false;
+
+  Future<void> _confirm() async {
+    setState(() => _capturing = true);
+    try {
+      final boundary =
+          _repaintKey.currentContext!.findRenderObject() as RenderRepaintBoundary;
+      final captured = await boundary.toImage(pixelRatio: 2.0);
+      final byteData = await captured.toByteData(format: ImageByteFormat.png);
+      final bytes = byteData!.buffer.asUint8List();
+      if (!mounted) return;
+      Navigator.pop(context, bytes);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _capturing = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(friendlyError(e))),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black,
+        title: const Text('Reposition Photo'),
+        actions: [
+          TextButton(
+            onPressed: _capturing ? null : _confirm,
+            child: _capturing
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Text('Use Photo'),
+          ),
+        ],
+      ),
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'Pinch to zoom, drag to reposition',
+                style: TextStyle(color: Colors.white.withOpacity(0.6), fontSize: 13),
+              ),
+              const SizedBox(height: 16),
+              AspectRatio(
+                aspectRatio: widget.aspectRatio,
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(12),
+                  child: RepaintBoundary(
+                    key: _repaintKey,
+                    child: LayoutBuilder(
+                      builder: (context, constraints) {
+                        return InteractiveViewer(
+                          transformationController: _transformController,
+                          minScale: 1.0,
+                          maxScale: 4.0,
+                          child: SizedBox(
+                            width: constraints.maxWidth,
+                            height: constraints.maxHeight,
+                            child: Image.file(widget.imageFile, fit: BoxFit.cover),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class SettingsPage extends StatefulWidget {
   final dynamic group;
 
@@ -4893,17 +5450,25 @@ try {
     final image = await picker.pickImage(source: ImageSource.gallery, imageQuality: 85);
     if (image == null) return;
 
+    if (!mounted) return;
+    final croppedBytes = await Navigator.push<Uint8List>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => _PhotoCropPage(imageFile: File(image.path)),
+      ),
+    );
+    if (croppedBytes == null) return;
+
     setState(() => _uploadingBackground = true);
 
     try {
-      final file = File(image.path);
       final path =
-          'group_backgrounds/${widget.group['id']}/${DateTime.now().millisecondsSinceEpoch}.jpg';
+          'group_backgrounds/${widget.group['id']}/${DateTime.now().millisecondsSinceEpoch}.png';
 
-      await supabase.storage.from('Photos').upload(
+      await supabase.storage.from('Photos').uploadBinary(
             path,
-            file,
-            fileOptions: const FileOptions(upsert: true),
+            croppedBytes,
+            fileOptions: const FileOptions(upsert: true, contentType: 'image/png'),
           );
 
       await supabase.from('groups').update({
@@ -4968,7 +5533,7 @@ try {
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : SingleChildScrollView(
-              padding: const EdgeInsets.all(20),
+              padding: EdgeInsets.fromLTRB(20, 20, 20, MediaQuery.of(context).padding.bottom + 20),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -5506,7 +6071,7 @@ class _RulesPageState extends State<RulesPage> {
                 : _rules.isEmpty && !_editing
                     ? const Center(child: Text('No rules have been added yet.'))
                     : ListView(
-                        padding: const EdgeInsets.all(16),
+                        padding: EdgeInsets.fromLTRB(16, 16, 16, MediaQuery.of(context).padding.bottom + 16),
                         children: [
                           for (var i = 0; i < _rules.length; i++)
                             Card(
@@ -6409,7 +6974,7 @@ Future<void> _issueWarning(Map<String, dynamic> member) async {
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : ListView.builder(
-              padding: const EdgeInsets.all(16),
+              padding: EdgeInsets.fromLTRB(16, 16, 16, MediaQuery.of(context).padding.bottom + 16),
               itemCount: _members.length,
               itemBuilder: (context, index) {
                 final member = _members[index];
@@ -6533,10 +7098,13 @@ class FullScreenPhotoPage extends StatelessWidget {
         child: InteractiveViewer(
           minScale: 0.5,
           maxScale: 4.0,
-          child: CachedNetworkImage(
-            imageUrl: imageUrl,
-            fit: BoxFit.contain,
-            placeholder: (context, url) => const Center(child: CircularProgressIndicator()),
+          child: Hero(
+            tag: imageUrl,
+            child: CachedNetworkImage(
+              imageUrl: imageUrl,
+              fit: BoxFit.contain,
+              placeholder: (context, url) => const Center(child: CircularProgressIndicator()),
+            ),
           ),
         ),
       ),
@@ -6557,38 +7125,47 @@ class _EmptyState extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(40),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            FaIcon(
-              icon,
-              size: 64,
-              color: Colors.white.withOpacity(0.15),
-            ),
-            const SizedBox(height: 16),
-            Text(
-              title,
-              textAlign: TextAlign.center,
-              style: const TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.bold,
-                color: Colors.white,
+      child: TweenAnimationBuilder<double>(
+        tween: Tween(begin: 0, end: 1),
+        duration: const Duration(milliseconds: 400),
+        curve: Curves.easeOut,
+        builder: (context, t, child) => Opacity(
+          opacity: t,
+          child: Transform.scale(scale: 0.9 + (0.1 * t), child: child),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(40),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              FaIcon(
+                icon,
+                size: 64,
+                color: Colors.white.withOpacity(0.15),
               ),
-            ),
-            if (subtitle != null) ...[
-              const SizedBox(height: 8),
+              const SizedBox(height: 16),
               Text(
-                subtitle!,
+                title,
                 textAlign: TextAlign.center,
-                style: TextStyle(
-                  fontSize: 14,
-                  color: Colors.white.withOpacity(0.5),
+                style: const TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.white,
                 ),
               ),
+              if (subtitle != null) ...[
+                const SizedBox(height: 8),
+                Text(
+                  subtitle!,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 14,
+                    color: Colors.white.withOpacity(0.5),
+                  ),
+                ),
+              ],
             ],
-          ],
+          ),
         ),
       ),
     );
@@ -6650,6 +7227,7 @@ class _ProfilePageState extends State<ProfilePage> {
   bool _loading = true;
   bool _saving = false;
   bool _showPassword = false;
+  bool _soundEffectsEnabled = true;
   String? _profilePhotoUrl;
   String? _profilePhotoPath;
 
@@ -6657,6 +7235,13 @@ class _ProfilePageState extends State<ProfilePage> {
   void initState() {
     super.initState();
     _loadProfile();
+    _loadSoundPreference();
+  }
+
+  Future<void> _loadSoundPreference() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
+    setState(() => _soundEffectsEnabled = prefs.getBool('sound_effects_enabled') ?? true);
   }
 
   Future<void> _loadProfile() async {
@@ -6876,7 +7461,7 @@ Future<void> _showDeleteConfirmation() async {
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : SingleChildScrollView(
-              padding: const EdgeInsets.all(24),
+              padding: EdgeInsets.fromLTRB(24, 24, 24, MediaQuery.of(context).padding.bottom + 24),
               child: Column(
                 children: [
                   GestureDetector(
@@ -6940,13 +7525,15 @@ Future<void> _showDeleteConfirmation() async {
                       final stats = snapshot.data;
                       if (stats == null) return const SizedBox.shrink();
 
-                      Widget stat(String emoji, String value, String label) {
+                      checkAchievementMilestones(context, stats);
+
+                      Widget stat(String emoji, int value, String label) {
                         return Column(
                           children: [
                             Text(emoji, style: const TextStyle(fontSize: 22)),
                             const SizedBox(height: 4),
-                            Text(
-                              value,
+                            _AnimatedCount(
+                              value: value,
                               style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                             ),
                             Text(
@@ -6966,9 +7553,9 @@ Future<void> _showDeleteConfirmation() async {
                             child: Row(
                               mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                               children: [
-                                stat('🔥', '${stats['longestStreak']}', 'Longest\nStreak'),
-                                stat('🏆', '${stats['totalWins']}', 'Total\nWins'),
-                                stat('🚫', '${stats['totalDisqualifications']}', 'Disqualifi-\ncations'),
+                                stat('🔥', stats['longestStreak'] ?? 0, 'Longest\nStreak'),
+                                stat('🏆', stats['totalWins'] ?? 0, 'Total\nWins'),
+                                stat('🚫', stats['totalDisqualifications'] ?? 0, 'Disqualifi-\ncations'),
                               ],
                             ),
                           ),
@@ -6976,6 +7563,20 @@ Future<void> _showDeleteConfirmation() async {
                       );
                     },
                   ),
+                  Card(
+                    child: SwitchListTile(
+                      title: const Text('Sound Effects'),
+                      subtitle: const Text('Play a sound for wins, scores, and achievements.'),
+                      value: _soundEffectsEnabled,
+                      onChanged: (value) async {
+                        setState(() => _soundEffectsEnabled = value);
+                        final prefs = await SharedPreferences.getInstance();
+                        await prefs.setBool('sound_effects_enabled', value);
+                        if (value) playFeedbackSound();
+                      },
+                    ),
+                  ),
+                  const SizedBox(height: 12),
                   Card(
                     child: Padding(
                       padding: const EdgeInsets.all(16),
@@ -7183,6 +7784,7 @@ class _OnboardingPageState extends State<OnboardingPage> {
                           Container(
                             width: 120,
                             height: 120,
+                            alignment: Alignment.center,
                             decoration: BoxDecoration(
                               shape: BoxShape.circle,
                               color: Colors.white.withOpacity(0.1),
@@ -7264,6 +7866,7 @@ class _OnboardingPageState extends State<OnboardingPage> {
                         Container(
                           width: 120,
                           height: 120,
+                          alignment: Alignment.center,
                           decoration: BoxDecoration(
                             shape: BoxShape.circle,
                             color: (page['color'] as Color).withOpacity(0.15),

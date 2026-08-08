@@ -69,7 +69,8 @@ async function getFirebaseAccessToken(): Promise<string> {
 async function sendPushNotification(
   fcmToken: string,
   title: string,
-  body: string
+  body: string,
+  imageUrl?: string
 ) {
   const projectId = FIREBASE_SERVICE_ACCOUNT.project_id;
   const accessToken = await getFirebaseAccessToken();
@@ -85,10 +86,17 @@ async function sendPushNotification(
       body: JSON.stringify({
         message: {
           token: fcmToken,
-          notification: { title, body },
+          notification: {
+            title,
+            body,
+            ...(imageUrl ? { image: imageUrl } : {}),
+          },
           android: {
             priority: "high",
-            notification: { sound: "default" },
+            notification: {
+              sound: "default",
+              ...(imageUrl ? { image: imageUrl } : {}),
+            },
           },
         },
       }),
@@ -100,9 +108,17 @@ async function sendPushNotification(
 
 serve(async (req) => {
   try {
-    const { type, groupId, senderId, senderName } = await req.json();
+    const { type, groupId, senderId, senderName, photoPath } = await req.json();
 
     const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
+    let photoSignedUrl: string | undefined;
+    if (type === "upload" && photoPath) {
+      const { data: signed } = await supabase.storage
+        .from("Photos")
+        .createSignedUrl(photoPath, 60 * 60);
+      photoSignedUrl = signed?.signedUrl;
+    }
 
     // Get all group members except the sender
     const { data: members } = await supabase
@@ -156,7 +172,12 @@ serve(async (req) => {
       }
 
       if (shouldSend) {
-        await sendPushNotification(user.fcm_token, title, body);
+        await sendPushNotification(
+          user.fcm_token,
+          title,
+          body,
+          type === "upload" ? photoSignedUrl : undefined
+        );
         sent++;
       }
     }
