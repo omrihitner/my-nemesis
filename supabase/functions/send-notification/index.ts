@@ -144,10 +144,14 @@ serve(async (req) => {
     }
 
     let sent = 0;
+    const results: any[] = [];
 
     for (const member of members) {
       const user = users.find((u: any) => u.id === member.user_id);
-      if (!user?.fcm_token) continue;
+      if (!user?.fcm_token) {
+        results.push({ username: user?.username ?? member.user_id, skipped: "no_token" });
+        continue;
+      }
 
       let title = "";
       let body = "";
@@ -172,17 +176,25 @@ serve(async (req) => {
       }
 
       if (shouldSend) {
-        await sendPushNotification(
+        const fcmResult = await sendPushNotification(
           user.fcm_token,
           title,
           body,
           type === "upload" ? photoSignedUrl : undefined
         );
-        sent++;
+
+        if (fcmResult?.error) {
+          results.push({ username: user.username, error: fcmResult.error });
+        } else {
+          results.push({ username: user.username, messageId: fcmResult?.name });
+          sent++;
+        }
+      } else {
+        results.push({ username: user.username, skipped: "notify_preference_off" });
       }
     }
 
-    return new Response(JSON.stringify({ sent }), { status: 200 });
+    return new Response(JSON.stringify({ sent, results }), { status: 200 });
   } catch (error) {
     return new Response(JSON.stringify({ error: error.message }), {
       status: 500,

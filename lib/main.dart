@@ -21,11 +21,104 @@ import 'package:firebase_analytics/firebase_analytics.dart';
 import 'package:confetti/confetti.dart';
 import 'package:in_app_review/in_app_review.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 const supabaseUrl = 'https://pwlidahqnfczjgqikzzy.supabase.co';
 const supabaseAnonKey = 'sb_publishable_xDxJd7g0SvwMtQ9L-1BATQ__ql0v8Ay';
 
+const kBgColor = Color(0xFF15131B);
+const kSurfaceColor = Color(0xFF1E1A24);
+const kAccentGold = Color(0xFFF3A93B);
+const kAccentTeal = Color(0xFF4FD1C2);
+
+class DoodleBackground extends StatelessWidget {
+  const DoodleBackground({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return const IgnorePointer(
+      child: CustomPaint(
+        size: Size.infinite,
+        painter: _DoodlePainter(),
+      ),
+    );
+  }
+}
+
+class _DoodlePainter extends CustomPainter {
+  const _DoodlePainter();
+
+  static const _glyphs = [
+    FontAwesomeIcons.camera,
+    FontAwesomeIcons.star,
+    FontAwesomeIcons.fire,
+    FontAwesomeIcons.trophy,
+    FontAwesomeIcons.scaleBalanced,
+  ];
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    const spacing = 90.0;
+    const glyphSize = 22.0;
+    var row = 0;
+    for (double y = -spacing; y < size.height + spacing; y += spacing) {
+      final offsetX = row.isOdd ? spacing / 2 : 0.0;
+      var col = 0;
+      for (double x = -spacing; x < size.width + spacing; x += spacing) {
+        final icon = _glyphs[(row + col) % _glyphs.length];
+        final tp = TextPainter(
+          text: TextSpan(
+            text: String.fromCharCode(icon.codePoint),
+            style: TextStyle(
+              fontSize: glyphSize,
+              fontFamily: icon.fontFamily,
+              package: icon.fontPackage,
+              color: Colors.white.withOpacity(0.045),
+            ),
+          ),
+          textDirection: TextDirection.ltr,
+        )..layout();
+        tp.paint(canvas, Offset(x + offsetX, y));
+        col++;
+      }
+      row++;
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _DoodlePainter oldDelegate) => false;
+}
+
 final analytics = FirebaseAnalytics.instance;
+
+final flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
+
+const kNotificationChannel = AndroidNotificationChannel(
+  'my_nemesis_default',
+  'Notifications',
+  description: 'Chat, uploads, scores and rule updates',
+  importance: Importance.high,
+);
+
+Future<void> _showLocalNotification(RemoteMessage message) async {
+  final notification = message.notification;
+  if (notification == null) return;
+
+  await flutterLocalNotificationsPlugin.show(
+    id: notification.hashCode,
+    title: notification.title,
+    body: notification.body,
+    notificationDetails: NotificationDetails(
+      android: AndroidNotificationDetails(
+        kNotificationChannel.id,
+        kNotificationChannel.name,
+        channelDescription: kNotificationChannel.description,
+        importance: Importance.high,
+        priority: Priority.high,
+      ),
+    ),
+  );
+}
 
 String roleLabel(String? role) {
   switch (role) {
@@ -103,7 +196,7 @@ Future<void> checkAchievementMilestones(BuildContext context, Map<String, int> s
   showDialog(
     context: context,
     builder: (_) => AlertDialog(
-      backgroundColor: const Color(0xFF1A1A1A),
+      backgroundColor: kSurfaceColor,
       title: Text('$unlockedEmoji Achievement Unlocked!', textAlign: TextAlign.center),
       content: Text(
         unlockedTitle!,
@@ -159,6 +252,24 @@ Future<void> main() async {
     DeviceOrientation.portraitDown,
   ]);
 
+  // FCM only auto-displays a system notification when the app is backgrounded
+  // or closed. When it's open in the foreground, we have to show it ourselves.
+  // Wrapped in try/catch so a notification-setup failure can never block app
+  // startup — it should degrade to "no foreground notifications", not a hang.
+  try {
+    await flutterLocalNotificationsPlugin.initialize(
+      settings: const InitializationSettings(
+        android: AndroidInitializationSettings('ic_launcher_foreground'),
+      ),
+    );
+    await flutterLocalNotificationsPlugin
+        .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
+        ?.createNotificationChannel(kNotificationChannel);
+    FirebaseMessaging.onMessage.listen(_showLocalNotification);
+  } catch (e, st) {
+    FirebaseCrashlytics.instance.recordError(e, st, fatal: false);
+  }
+
   await Supabase.initialize(
     url: supabaseUrl,
     anonKey: supabaseAnonKey,
@@ -179,15 +290,15 @@ class MyNemesisApp extends StatelessWidget {
       theme: ThemeData(
         brightness: Brightness.dark,
         textTheme: GoogleFonts.outfitTextTheme(ThemeData.dark().textTheme),
-        scaffoldBackgroundColor: const Color(0xFF0A0A0A),
-        cardColor: const Color(0xFF1A1A1A),
+        scaffoldBackgroundColor: kBgColor,
+        cardColor: kSurfaceColor,
         colorScheme: const ColorScheme.dark(
           primary: Color(0xFFE10600),
           secondary: Colors.white,
-          surface: Color(0xFF1A1A1A),
+          surface: kSurfaceColor,
         ),
         appBarTheme: const AppBarTheme(
-          backgroundColor: Color(0xFF0A0A0A),
+          backgroundColor: kBgColor,
           elevation: 0,
           centerTitle: true,
           titleTextStyle: TextStyle(
@@ -217,7 +328,7 @@ class MyNemesisApp extends StatelessWidget {
           ),
         ),
         cardTheme: CardThemeData(
-          color: const Color(0xFF1A1A1A),
+          color: kSurfaceColor,
           elevation: 0,
           margin: const EdgeInsets.symmetric(vertical: 8),
           shape: RoundedRectangleBorder(
@@ -229,7 +340,7 @@ class MyNemesisApp extends StatelessWidget {
           contentPadding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         ),
         bottomSheetTheme: const BottomSheetThemeData(
-          backgroundColor: Color(0xFF1A1A1A),
+          backgroundColor: kSurfaceColor,
         ),
         switchTheme: SwitchThemeData(
           thumbColor: WidgetStateProperty.resolveWith(
@@ -565,30 +676,81 @@ class _LoginPageState extends State<LoginPage> {
   }
 }
 
-Future<Map<String, dynamic>?> fetchGroupLeader(String groupId) async {
+/// Win counts per user in a group: for each day with judged submissions,
+/// whoever had the highest total score that day (earliest submission
+/// breaking ties) gets credit for one win. This is the app's scoring model —
+/// a daily win is worth 1 point, not the raw judge score total, which only
+/// decides who wins that individual day.
+Future<Map<String, int>> fetchGroupWinCounts(
+  String groupId, {
+  DateTime? from,
+  DateTime? to,
+}) async {
   final supabase = Supabase.instance.client;
 
-  final submissions = await supabase.from('submissions').select().eq('group_id', groupId);
-  final scores = await supabase.from('scores').select();
+  var query = supabase.from('submissions').select().eq('group_id', groupId);
+  if (from != null) query = query.gte('submitted_at', from.toIso8601String());
+  if (to != null) query = query.lt('submitted_at', to.toIso8601String());
+  final submissions = await query;
 
-  final totals = <String, int>{};
-  for (final submission in submissions) {
-    final userId = submission['user_id'];
-    final submissionScores = scores.where((s) => s['submission_id'] == submission['id']);
-    for (final score in submissionScores) {
-      totals[userId] = (totals[userId] ?? 0) + ((score['score'] ?? 0) as int);
-    }
+  if (submissions.isEmpty) return {};
+
+  final submissionIds = submissions.map((s) => s['id']).toList();
+  final scores = await supabase
+      .from('scores')
+      .select()
+      .inFilter('submission_id', submissionIds);
+
+  final byDay = <String, List<dynamic>>{};
+  for (final s in submissions) {
+    final date = DateTime.parse(s['submitted_at'].toString());
+    byDay.putIfAbsent(_dateKeyForStreak(date), () => []).add(s);
   }
 
-  if (totals.isEmpty) return null;
+  final wins = <String, int>{};
 
-  final leaderId = totals.entries.reduce((a, b) => a.value >= b.value ? a : b).key;
-  final leaderScore = totals[leaderId] ?? 0;
+  for (final daySubs in byDay.values) {
+    final totals = <String, int>{};
+    final submittedTimes = <String, String>{};
 
+    for (final s in daySubs) {
+      final uid = s['user_id'] as String;
+      submittedTimes[uid] = s['submitted_at'].toString();
+      final subScores = scores.where((sc) => sc['submission_id'] == s['id']);
+      for (final sc in subScores) {
+        totals[uid] = (totals[uid] ?? 0) + ((sc['score'] ?? 0) as int);
+      }
+    }
+
+    if (totals.isEmpty) continue;
+
+    final maxScore = totals.values.reduce((a, b) => a > b ? a : b);
+    final topUserIds = totals.entries
+        .where((e) => e.value == maxScore)
+        .map((e) => e.key)
+        .toList()
+      ..sort((a, b) => submittedTimes[a]!.compareTo(submittedTimes[b]!));
+
+    final winnerId = topUserIds.first;
+    wins[winnerId] = (wins[winnerId] ?? 0) + 1;
+  }
+
+  return wins;
+}
+
+Future<Map<String, dynamic>?> fetchGroupLeader(String groupId) async {
+  final wins = await fetchGroupWinCounts(groupId);
+
+  if (wins.isEmpty) return null;
+
+  final leaderId = wins.entries.reduce((a, b) => a.value >= b.value ? a : b).key;
+  final leaderWins = wins[leaderId] ?? 0;
+
+  final supabase = Supabase.instance.client;
   final users = await supabase.from('users').select().eq('id', leaderId);
   final leaderName = users.isNotEmpty ? users.first['username'] : 'Unknown';
 
-  return {'name': leaderName, 'score': leaderScore};
+  return {'name': leaderName, 'score': leaderWins};
 }
 
 Future<int> fetchGroupUnreadCount(String groupId) async {
@@ -658,6 +820,40 @@ Future<Map<String, int>> fetchGroupStreaks(String groupId) async {
   });
 
   return streaks;
+}
+
+/// Longest-ever submission streak per member within a single group.
+Future<Map<String, int>> fetchGroupLongestStreaks(String groupId) async {
+  final supabase = Supabase.instance.client;
+
+  final submissions = await supabase
+      .from('submissions')
+      .select()
+      .eq('group_id', groupId);
+
+  final datesByUser = <String, Set<DateTime>>{};
+  for (final s in submissions) {
+    final userId = s['user_id'] as String;
+    final date = DateTime.parse(s['submitted_at'].toString());
+    datesByUser
+        .putIfAbsent(userId, () => {})
+        .add(DateTime(date.year, date.month, date.day));
+  }
+
+  final longest = <String, int>{};
+  datesByUser.forEach((userId, dateSet) {
+    final dates = dateSet.toList()..sort();
+    var currentRun = 1;
+    var best = 1;
+    for (var i = 1; i < dates.length; i++) {
+      final diff = dates[i].difference(dates[i - 1]).inDays;
+      currentRun = diff == 1 ? currentRun + 1 : 1;
+      if (currentRun > best) best = currentRun;
+    }
+    longest[userId] = best;
+  });
+
+  return longest;
 }
 
 /// Lifetime achievement stats for a user, aggregated across every group
@@ -785,12 +981,21 @@ String friendlyError(Object e) {
   return 'Something went wrong. Please try again.';
 }
 
-void navigateToGroupTab(BuildContext context, dynamic group, int index) {
+void navigateToGroupTab(BuildContext context, dynamic group, int index, [int currentIndex = 0]) {
+  if (index == currentIndex) return;
+
+  HapticFeedback.selectionClick();
+
+  if (index == 0) {
+    // The dashboard is always directly below on the stack (see the
+    // currentIndex == 0 branch below) — pop back to it instead of pushing a
+    // fresh instance, so the back button never skips past it to the group list.
+    Navigator.pop(context);
+    return;
+  }
+
   late final Widget page;
   switch (index) {
-    case 0:
-      page = GroupDashboardPage(group: group);
-      break;
     case 1:
       page = CalendarPage(group: group);
       break;
@@ -804,12 +1009,15 @@ void navigateToGroupTab(BuildContext context, dynamic group, int index) {
       return;
   }
 
-  HapticFeedback.selectionClick();
-
-  Navigator.pushReplacement(
-    context,
-    MaterialPageRoute(builder: (_) => page),
-  );
+  if (currentIndex == 0) {
+    // Leaving the dashboard for a tab: push (not replace) so the back
+    // button returns to the dashboard instead of the group list.
+    Navigator.push(context, MaterialPageRoute(builder: (_) => page));
+  } else {
+    // Switching between two non-dashboard tabs: replace so the stack
+    // doesn't grow with every tab switch.
+    Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => page));
+  }
 }
 
 Widget buildGroupBottomNav(BuildContext context, dynamic group, int currentIndex) {
@@ -817,10 +1025,10 @@ Widget buildGroupBottomNav(BuildContext context, dynamic group, int currentIndex
     currentIndex: currentIndex,
     onTap: (index) {
       if (index == currentIndex) return;
-      navigateToGroupTab(context, group, index);
+      navigateToGroupTab(context, group, index, currentIndex);
     },
     type: BottomNavigationBarType.fixed,
-    backgroundColor: const Color(0xFF0A0A0A),
+    backgroundColor: kBgColor,
     selectedItemColor: const Color(0xFFE10600),
     unselectedItemColor: Colors.white54,
     items: const [
@@ -917,17 +1125,21 @@ class _HomePageState extends State<HomePage> {
   return groups;
 }
 
-  Widget _groupCardChip(String label) {
+  Widget _groupCardChip(String label, {Color? accent}) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
       decoration: BoxDecoration(
         color: Colors.black.withOpacity(0.35),
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.white24),
+        border: Border.all(color: accent?.withOpacity(0.6) ?? Colors.white24),
       ),
       child: Text(
         label,
-        style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w600),
+        style: TextStyle(
+          color: accent ?? Colors.white,
+          fontSize: 11,
+          fontWeight: FontWeight.w600,
+        ),
       ),
     );
   }
@@ -999,8 +1211,12 @@ class _HomePageState extends State<HomePage> {
                               runSpacing: 4,
                               children: [
                                 if (leader != null)
-                                  _groupCardChip('🏆 ${leader['name']} · ${leader['score']}'),
-                                if (myStreak > 0) _groupCardChip('🔥 $myStreak'),
+                                  _groupCardChip(
+                                    '🏆 ${leader['name']} · ${leader['score']} wins',
+                                    accent: kAccentGold,
+                                  ),
+                                if (myStreak > 0)
+                                  _groupCardChip('🔥 $myStreak', accent: kAccentGold),
                                 _groupCardChip(unread > 0 ? '💬 $unread' : '💬 0'),
                               ],
                             ),
@@ -1082,36 +1298,41 @@ class _HomePageState extends State<HomePage> {
           ),
         ],
       ),
-  body: RefreshIndicator(
-        onRefresh: () async => setState(() {}),
-        child: FutureBuilder<List<dynamic>>(
-          future: fetchGroups(),
-          builder: (context, snapshot) {
-            final groups = snapshot.data ?? [];
-            final isLoading =
-                snapshot.connectionState == ConnectionState.waiting;
+  body: Stack(
+        children: [
+          const Positioned.fill(child: DoodleBackground()),
+          RefreshIndicator(
+            onRefresh: () async => setState(() {}),
+            child: FutureBuilder<List<dynamic>>(
+              future: fetchGroups(),
+              builder: (context, snapshot) {
+                final groups = snapshot.data ?? [];
+                final isLoading =
+                    snapshot.connectionState == ConnectionState.waiting;
 
-            return ListView(
-              padding: EdgeInsets.fromLTRB(
-                  20, 20, 20, MediaQuery.of(context).padding.bottom + 90),
-              children: [
-                if (isLoading)
-                  const Center(child: CircularProgressIndicator())
-                else if (snapshot.hasError)
-                  Center(child: Text('Error: ${snapshot.error}'))
-                else if (groups.isEmpty)
-                  const _EmptyState(
-                    icon: FontAwesomeIcons.usersSlash,
-                    title: 'No groups yet',
-                    subtitle:
-                        'Create your first group or join one with an invite code.',
-                  )
-                else
-                  ...groups.map((group) => _buildGroupCard(group)),
-              ],
-            );
-          },
-        ),
+                return ListView(
+                  padding: EdgeInsets.fromLTRB(
+                      20, 20, 20, MediaQuery.of(context).padding.bottom + 90),
+                  children: [
+                    if (isLoading)
+                      const Center(child: CircularProgressIndicator())
+                    else if (snapshot.hasError)
+                      Center(child: Text('Error: ${snapshot.error}'))
+                    else if (groups.isEmpty)
+                      const _EmptyState(
+                        icon: FontAwesomeIcons.usersSlash,
+                        title: 'No groups yet',
+                        subtitle:
+                            'Create your first group or join one with an invite code.',
+                      )
+                    else
+                      ...groups.map((group) => _buildGroupCard(group)),
+                  ],
+                );
+              },
+            ),
+          ),
+        ],
       ),
       floatingActionButton: FloatingActionButton(
         onPressed: () => _showCreateJoinSheet(context),
@@ -1294,6 +1515,8 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
   bool _ownerIsJudge = false;
   bool _judgeAlsoPlays = false;
   bool _uploading = false;
+  String? _statsLeftUserId;
+  String? _statsRightUserId;
 
   @override
   void initState() {
@@ -1544,6 +1767,206 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
         'streak': streaks[member['user_id']] ?? 0,
       };
     }).toList();
+  }
+
+  // Includes every member regardless of their *current* role, not just
+  // currently-competing ones — wins/streaks are historical, so someone who's
+  // judge-only today but used to play (or vice versa) should still be
+  // selectable for comparison.
+  Future<List<Map<String, dynamic>>> _fetchStatsBarData() async {
+    final supabase = Supabase.instance.client;
+
+    final members = await supabase
+        .from('group_members')
+        .select()
+        .eq('group_id', widget.group['id']);
+
+    final userIds = members.map((m) => m['user_id']).toList();
+    final users = userIds.isEmpty
+        ? <dynamic>[]
+        : await supabase.from('users').select().inFilter('id', userIds);
+
+    final wins = await fetchGroupWinCounts(widget.group['id']);
+    final currentStreaks = await fetchGroupStreaks(widget.group['id']);
+    final longestStreaks = await fetchGroupLongestStreaks(widget.group['id']);
+
+    final stats = members.map((m) {
+      final uid = m['user_id'];
+      final user = users.firstWhere(
+        (u) => u['id'] == uid,
+        orElse: () => {'username': 'Unknown'},
+      );
+      return {
+        'user_id': uid,
+        'username': user['username'],
+        'wins': wins[uid] ?? 0,
+        'currentStreak': currentStreaks[uid] ?? 0,
+        'longestStreak': longestStreaks[uid] ?? 0,
+      };
+    }).toList();
+
+    stats.sort((a, b) => (b['wins'] as int).compareTo(a['wins'] as int));
+    return stats;
+  }
+
+
+  Widget _buildStatsBar(List<Map<String, dynamic>> stats) {
+    Map<String, dynamic> a;
+    Map<String, dynamic> b;
+    final showPicker = stats.length > 2;
+
+    if (!showPicker) {
+      a = stats[0];
+      b = stats[1];
+    } else {
+      final myId = Supabase.instance.client.auth.currentUser?.id;
+      a = stats.firstWhere(
+        (s) => s['user_id'] == (_statsLeftUserId ?? myId),
+        orElse: () => stats[0],
+      );
+      b = stats.firstWhere(
+        (s) => s['user_id'] == _statsRightUserId && s['user_id'] != a['user_id'],
+        orElse: () => stats.firstWhere(
+          (s) => s['user_id'] != a['user_id'],
+          orElse: () => stats[1],
+        ),
+      );
+    }
+
+    Widget statRow(String label, int aVal, int bVal) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                '$aVal',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                  color: aVal > bVal ? kAccentGold : Colors.white,
+                ),
+              ),
+            ),
+            SizedBox(
+              width: 96,
+              child: Text(
+                label,
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 11, color: Colors.white.withOpacity(0.6)),
+              ),
+            ),
+            Expanded(
+              child: Text(
+                '$bVal',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                  color: bVal > aVal ? kAccentGold : Colors.white,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                const FaIcon(FontAwesomeIcons.chartSimple, size: 16),
+                const SizedBox(width: 8),
+                const Text(
+                  'Head to Head',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                ),
+                if (showPicker) ...[
+                  const Spacer(),
+                  InkWell(
+                    borderRadius: BorderRadius.circular(20),
+                    onTap: () => _openComparePicker(stats),
+                    child: const Padding(
+                      padding: EdgeInsets.all(6),
+                      child: FaIcon(FontAwesomeIcons.sliders, size: 16, color: Colors.white70),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+            const SizedBox(height: 14),
+            Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    children: [
+                      _MemberAvatar(username: a['username'] ?? '?', color: Colors.redAccent, size: 44),
+                      const SizedBox(height: 6),
+                      Text(
+                        a['username'] ?? '?',
+                        style: const TextStyle(fontWeight: FontWeight.bold),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ),
+                ),
+                Text(
+                  'VS',
+                  style: TextStyle(color: Colors.white.withOpacity(0.4), fontWeight: FontWeight.bold),
+                ),
+                Expanded(
+                  child: Column(
+                    children: [
+                      _MemberAvatar(username: b['username'] ?? '?', color: Colors.blueAccent, size: 44),
+                      const SizedBox(height: 6),
+                      Text(
+                        b['username'] ?? '?',
+                        style: const TextStyle(fontWeight: FontWeight.bold),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const Divider(height: 24),
+            statRow('🏆 Wins', a['wins'] as int, b['wins'] as int),
+            statRow('🔥 Streak', a['currentStreak'] as int, b['currentStreak'] as int),
+            statRow('⭐ Best Streak', a['longestStreak'] as int, b['longestStreak'] as int),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openComparePicker(List<Map<String, dynamic>> stats) async {
+    final myId = Supabase.instance.client.auth.currentUser?.id;
+    final result = await showModalBottomSheet<Map<String, String?>>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: kSurfaceColor,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (_) => _ComparePickerSheet(
+        stats: stats,
+        initialLeftId: _statsLeftUserId ?? myId,
+        initialRightId: _statsRightUserId,
+      ),
+    );
+
+    if (result != null && mounted) {
+      setState(() {
+        _statsLeftUserId = result['left'];
+        _statsRightUserId = result['right'];
+      });
+    }
   }
 
   Future<List<Map<String, dynamic>>> fetchBattleStatus() async {
@@ -1835,34 +2258,43 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
   }
 Future<Map<String, dynamic>> _fetchHeaderData() async {
     final supabase = Supabase.instance.client;
-
-    final leader = await fetchGroupLeader(widget.group['id']);
-    final unread = await _unreadChatCount();
-
-    String? backgroundUrl;
+    final user = supabase.auth.currentUser;
     final photoPath = widget.group['background_photo_url'];
-    if (photoPath != null) {
-      backgroundUrl = await supabase.storage.from('Photos').createSignedUrl(photoPath, 60 * 60);
-    }
+
+    final results = await Future.wait([
+      fetchGroupLeader(widget.group['id']),
+      _unreadChatCount(),
+      fetchGroupStreaks(widget.group['id']),
+      photoPath != null
+          ? supabase.storage.from('Photos').createSignedUrl(photoPath, 60 * 60)
+          : Future.value(null),
+    ]);
+
+    final streaks = results[2] as Map<String, int>;
 
     return {
-      'leader': leader,
-      'unread': unread,
-      'backgroundUrl': backgroundUrl,
+      'leader': results[0] as Map<String, dynamic>?,
+      'unread': results[1] as int,
+      'backgroundUrl': results[3] as String?,
+      'myStreak': streaks[user?.id] ?? 0,
     };
   }
 
-  Widget _headerChip(String label) {
+  Widget _headerChip(String label, {Color? accent}) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
       decoration: BoxDecoration(
         color: Colors.black.withOpacity(0.35),
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.white24),
+        border: Border.all(color: accent?.withOpacity(0.6) ?? Colors.white24),
       ),
       child: Text(
         label,
-        style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600),
+        style: TextStyle(
+          color: accent ?? Colors.white,
+          fontSize: 12,
+          fontWeight: FontWeight.w600,
+        ),
       ),
     );
   }
@@ -2346,7 +2778,7 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
       height: 56,
       padding: const EdgeInsets.symmetric(horizontal: 8),
       decoration: const BoxDecoration(
-        color: Color(0xFF0A0A0A),
+        color: kBgColor,
         border: Border(top: BorderSide(color: Colors.white10)),
       ),
       child: Row(
@@ -2435,6 +2867,9 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
     final isJudging = isOwner ? _ownerIsJudge : _myRole == 'judge';
     final canUpload = !isJudging || _judgeAlsoPlays;
     final isHybridJudge = isJudging && _judgeAlsoPlays;
+    final challengesPerWeek = widget.group['challenges_per_week'] ?? 0;
+    final isTodayChallenge = isChallengeDay(widget.group['id'], challengesPerWeek, DateTime.now());
+    final challengeText = isTodayChallenge ? challengeTextFor(widget.group['id'], DateTime.now()) : null;
 
     return Scaffold(
       appBar: AppBar(
@@ -2539,7 +2974,10 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
           ),
         ],
       ),
-body: RefreshIndicator(
+body: Stack(
+        children: [
+          const Positioned.fill(child: DoodleBackground()),
+          RefreshIndicator(
         onRefresh: () async => setState(() {}),
         child: SingleChildScrollView(
           physics: const AlwaysScrollableScrollPhysics(),
@@ -2554,11 +2992,12 @@ body: RefreshIndicator(
                   final data = snapshot.data;
                   final leader = data?['leader'] as Map<String, dynamic>?;
                   final unread = data?['unread'] as int? ?? 0;
+                  final myStreak = data?['myStreak'] as int? ?? 0;
                   final backgroundUrl = data?['backgroundUrl'] as String?;
                   final backgroundColorHex = widget.group['background_color'] as String?;
                   final baseColor = backgroundColorHex != null
                       ? hexToColor(backgroundColorHex)
-                      : const Color(0xFF1A1A1A);
+                      : kSurfaceColor;
 
                   return Container(
                     height: 160,
@@ -2605,12 +3044,17 @@ body: RefreshIndicator(
                                 runSpacing: 8,
                                 children: [
                                   if (leader != null)
-                                    _headerChip('🏆 ${leader['name']} · ${leader['score']} pts'),
+                                    _headerChip(
+                                      '🏆 ${leader['name']} · ${leader['score']} wins',
+                                      accent: kAccentGold,
+                                    ),
+                                  if (myStreak > 0)
+                                    _headerChip('🔥 Your streak: $myStreak', accent: kAccentGold),
                                   _headerChip(
                                     unread > 0 ? '💬 $unread unread' : '💬 No new messages',
                                   ),
                                   if (widget.group['anonymous_judging'] == true)
-                                    _headerChip('🕶️ Anonymous judging'),
+                                    _headerChip('🕶️ Anonymous judging', accent: kAccentTeal),
                                 ],
                               ),
                             ],
@@ -2662,90 +3106,6 @@ body: RefreshIndicator(
                 },
               ),
               const SizedBox(height: 10),
-              FutureBuilder<List<dynamic>>(
-                future: fetchMembersWithNames(),
-                builder: (context, snapshot) {
-                  if (snapshot.connectionState == ConnectionState.waiting) {
-                    return const Card(
-                      child: ListTile(
-                        leading: FaIcon(FontAwesomeIcons.users),
-                        title: Text('Members'),
-                        subtitle: Text('Loading...'),
-                      ),
-                    );
-                  }
-
-                  if (snapshot.hasError) {
-                    return Card(
-                      child: ListTile(
-                        leading: const FaIcon(FontAwesomeIcons.users),
-                        title: const Text('Members'),
-                        subtitle: Text('Error: ${snapshot.error}'),
-                      ),
-                    );
-                  }
-
-                  final members = snapshot.data ?? [];
-
-               const List<Color> palette = [
-                    Colors.redAccent,
-                    Colors.blueAccent,
-                    Colors.greenAccent,
-                    Colors.purpleAccent,
-                    Colors.orangeAccent,
-                    Colors.tealAccent,
-                    Colors.pinkAccent,
-                    Colors.amberAccent,
-                  ];
-
-                  return Card(
-                    child: Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            '👥 Members (${members.length})',
-                            style: const TextStyle(fontWeight: FontWeight.bold),
-                          ),
-                          const SizedBox(height: 12),
-                          ...members.asMap().entries.map((entry) {
-                            final index = entry.key;
-                            final m = entry.value;
-                            final color = palette[index % palette.length];
-
-                            return Padding(
-                              padding: const EdgeInsets.symmetric(vertical: 4),
-                              child: Row(
-                                children: [
-                                  _MemberAvatar(
-                                    username: m['username'] ?? '?',
-                                    color: color,
-                                  ),
-                                  const SizedBox(width: 12),
-                                  FaIcon(roleIconData(m['role']), size: 16, color: Colors.white70),
-                                  const SizedBox(width: 6),
-                                  Expanded(
-                                    child: Text(
-                                      m['username'] ?? 'Unknown',
-                                      style: const TextStyle(fontSize: 15),
-                                    ),
-                                  ),
-                                  if ((m['streak'] ?? 0) > 0)
-                                    Text(
-                                      '🔥 ${m['streak']}',
-                                      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
-                                    ),
-                                ],
-                              ),
-                            );
-                          }),
-                        ],
-                      ),
-                    ),
-                  );
-                },
-              ),
               FutureBuilder<List<Map<String, dynamic>>>(
                 future: fetchBattleStatus(),
                 builder: (context, snapshot) {
@@ -2777,16 +3137,38 @@ body: RefreshIndicator(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
-                          const Padding(
-                            padding: EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
                             child: Row(
                               children: [
-                                FaIcon(FontAwesomeIcons.calendarCheck),
-                                SizedBox(width: 8),
-                                Text(
+                                const FaIcon(FontAwesomeIcons.calendarCheck),
+                                const SizedBox(width: 8),
+                                const Text(
                                   'Today’s Battle',
                                   style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
                                 ),
+                                if (challengeText != null) ...[
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                      decoration: BoxDecoration(
+                                        color: kAccentGold.withOpacity(0.15),
+                                        borderRadius: BorderRadius.circular(20),
+                                        border: Border.all(color: kAccentGold.withOpacity(0.5)),
+                                      ),
+                                      child: Text(
+                                        '🎯 $challengeText',
+                                        overflow: TextOverflow.ellipsis,
+                                        style: const TextStyle(
+                                          color: kAccentGold,
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ],
                               ],
                             ),
                           ),
@@ -2827,50 +3209,150 @@ body: RefreshIndicator(
                   );
                 },
               ),
-              FutureBuilder<Map<String, dynamic>?>(
-                future: fetchGroupLeader(widget.group['id']),
+              const SizedBox(height: 16),
+              FutureBuilder<List<dynamic>>(
+                future: fetchMembersWithNames(),
                 builder: (context, snapshot) {
                   if (snapshot.connectionState == ConnectionState.waiting) {
                     return const Card(
                       child: ListTile(
-                        title: Text('Current Leader'),
+                        leading: FaIcon(FontAwesomeIcons.users),
+                        title: Text('Members'),
                         subtitle: Text('Loading...'),
                       ),
                     );
                   }
 
-                  final leader = snapshot.data;
-
-                  if (leader == null) {
-                    return const Card(
+                  if (snapshot.hasError) {
+                    return Card(
                       child: ListTile(
-                        leading: Text('🏆', style: TextStyle(fontSize: 28)),
-                        title: Text('Current Leader'),
-                        subtitle: Text('No scores yet'),
+                        leading: const FaIcon(FontAwesomeIcons.users),
+                        title: const Text('Members'),
+                        subtitle: Text('Error: ${snapshot.error}'),
                       ),
                     );
                   }
 
+                  final members = snapshot.data ?? [];
+
+               const List<Color> palette = [
+                    Colors.redAccent,
+                    Colors.blueAccent,
+                    Colors.greenAccent,
+                    Colors.purpleAccent,
+                    Colors.orangeAccent,
+                    Colors.tealAccent,
+                    Colors.pinkAccent,
+                    Colors.amberAccent,
+                  ];
+
                   return Card(
-                    child: ListTile(
-                      leading: const Text('🏆', style: TextStyle(fontSize: 28)),
-                      title: const Text(
-                        '🏆 Current Leader',
-                        style: TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                      subtitle: Text(leader['name']),
-                      trailing: Text(
-                        '${leader['score']} pts',
-                        style: const TextStyle(fontWeight: FontWeight.bold),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                      child: Row(
+                        children: [
+                          Text(
+                            'Members (${members.length})',
+                            style: const TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: SingleChildScrollView(
+                              scrollDirection: Axis.horizontal,
+                              child: Row(
+                                children: members.asMap().entries.map((entry) {
+                                  final index = entry.key;
+                                  final m = entry.value;
+                                  final color = palette[index % palette.length];
+                                  final streak = (m['streak'] ?? 0) as int;
+
+                                  return Padding(
+                                    padding: const EdgeInsets.only(right: 14),
+                                    child: Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Stack(
+                                          clipBehavior: Clip.none,
+                                          children: [
+                                            _MemberAvatar(
+                                              username: m['username'] ?? '?',
+                                              color: color,
+                                            ),
+                                            if (m['role'] != 'player')
+                                              Positioned(
+                                                left: -4,
+                                                top: -4,
+                                                child: Container(
+                                                  padding: const EdgeInsets.all(3),
+                                                  decoration: const BoxDecoration(
+                                                    color: kBgColor,
+                                                    shape: BoxShape.circle,
+                                                  ),
+                                                  child: FaIcon(
+                                                    roleIconData(m['role']),
+                                                    size: 9,
+                                                    color: Colors.white70,
+                                                  ),
+                                                ),
+                                              ),
+                                            if (streak > 0)
+                                              Positioned(
+                                                right: -4,
+                                                bottom: -2,
+                                                child: Container(
+                                                  padding: const EdgeInsets.symmetric(
+                                                      horizontal: 4, vertical: 1),
+                                                  decoration: BoxDecoration(
+                                                    color: kBgColor,
+                                                    borderRadius: BorderRadius.circular(8),
+                                                    border: Border.all(color: kAccentGold, width: 1),
+                                                  ),
+                                                  child: Text(
+                                                    '🔥$streak',
+                                                    style: const TextStyle(
+                                                      fontSize: 9,
+                                                      fontWeight: FontWeight.bold,
+                                                      color: kAccentGold,
+                                                    ),
+                                                  ),
+                                                ),
+                                              ),
+                                          ],
+                                        ),
+                                        const SizedBox(height: 4),
+                                        Text(
+                                          m['username'] ?? '?',
+                                          style: const TextStyle(fontSize: 10),
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ],
+                                    ),
+                                  );
+                                }).toList(),
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   );
+                },
+              ),
+              const SizedBox(height: 16),
+              FutureBuilder<List<Map<String, dynamic>>>(
+                future: _fetchStatsBarData(),
+                builder: (context, snapshot) {
+                  final stats = snapshot.data ?? [];
+                  if (stats.length < 2) return const SizedBox.shrink();
+                  return _buildStatsBar(stats);
                 },
               ),
             ],
      ),
         ),
       ),
+      ),
+        ],
       ),
       bottomNavigationBar: _homeBottomBar(canUpload, isHybridJudge),
     );
@@ -2917,7 +3399,7 @@ class _WinCelebrationDialogState extends State<_WinCelebrationDialog> {
           colors: const [Color(0xFFE10600), Colors.white, Colors.amber, Colors.greenAccent],
         ),
         AlertDialog(
-          backgroundColor: const Color(0xFF1A1A1A),
+          backgroundColor: kSurfaceColor,
           title: const Text('🏆 You Won Today!', textAlign: TextAlign.center),
           content: Text(
             'Your photo scored ${widget.score} points — best of the day. Nice one!',
@@ -2935,6 +3417,192 @@ class _WinCelebrationDialogState extends State<_WinCelebrationDialog> {
           ],
         ),
       ],
+    );
+  }
+}
+
+class _ComparePickerSheet extends StatefulWidget {
+  final List<Map<String, dynamic>> stats;
+  final String? initialLeftId;
+  final String? initialRightId;
+
+  const _ComparePickerSheet({
+    required this.stats,
+    this.initialLeftId,
+    this.initialRightId,
+  });
+
+  @override
+  State<_ComparePickerSheet> createState() => _ComparePickerSheetState();
+}
+
+class _ComparePickerSheetState extends State<_ComparePickerSheet> {
+  String? _leftId;
+  String? _rightId;
+  String _activeSlot = 'left';
+
+  @override
+  void initState() {
+    super.initState();
+    _leftId = widget.initialLeftId;
+    _rightId = widget.initialRightId;
+  }
+
+  Map<String, dynamic>? _findById(String? id) {
+    if (id == null) return null;
+    final match = widget.stats.where((s) => s['user_id'] == id);
+    return match.isEmpty ? null : match.first;
+  }
+
+  Widget _slot(String? userId, bool isActive, VoidCallback onTap) {
+    final data = _findById(userId);
+    return Expanded(
+      child: GestureDetector(
+        onTap: onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 8),
+          decoration: BoxDecoration(
+            color: isActive ? kAccentGold.withOpacity(0.12) : Colors.white.withOpacity(0.03),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: isActive ? kAccentGold : Colors.white24,
+              width: isActive ? 2 : 1,
+            ),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (data != null)
+                _MemberAvatar(username: data['username'] ?? '?', color: kAccentGold, size: 40)
+              else
+                Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    border: Border.all(color: Colors.white38),
+                  ),
+                  child: const Icon(Icons.add, color: Colors.white38),
+                ),
+              const SizedBox(height: 8),
+              Text(
+                data != null ? (data['username'] ?? '?') : 'Choose',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: data != null ? Colors.white : Colors.white54,
+                ),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.only(
+        left: 20,
+        right: 20,
+        top: 20,
+        bottom: MediaQuery.of(context).viewInsets.bottom +
+            MediaQuery.of(context).padding.bottom +
+            20,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Center(
+            child: Container(
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                color: Colors.white24,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+          const Text(
+            'Compare Players',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 20),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              _slot(_leftId, _activeSlot == 'left', () => setState(() => _activeSlot = 'left')),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+                child: Text(
+                  'VS',
+                  style: TextStyle(color: kAccentGold, fontWeight: FontWeight.w900, fontSize: 16),
+                ),
+              ),
+              _slot(_rightId, _activeSlot == 'right', () => setState(() => _activeSlot = 'right')),
+            ],
+          ),
+          const SizedBox(height: 20),
+          const Divider(height: 1),
+          const SizedBox(height: 12),
+          Text(
+            _activeSlot == 'left' ? 'Pick the left player' : 'Pick the right player',
+            style: TextStyle(
+              fontSize: 12,
+              color: Colors.white.withOpacity(0.5),
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 6),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 260),
+            child: ListView(
+              shrinkWrap: true,
+              children: widget.stats.map((s) {
+                final uid = s['user_id'] as String;
+                final selected = _activeSlot == 'left' ? _leftId == uid : _rightId == uid;
+                final disabled = _activeSlot == 'left' ? _rightId == uid : _leftId == uid;
+                return ListTile(
+                  enabled: !disabled,
+                  leading: _MemberAvatar(username: s['username'] ?? '?', color: kAccentGold, size: 32),
+                  title: Text(s['username'] ?? '?'),
+                  trailing: selected
+                      ? const FaIcon(FontAwesomeIcons.check, size: 16, color: kAccentGold)
+                      : null,
+                  onTap: disabled
+                      ? null
+                      : () {
+                          setState(() {
+                            if (_activeSlot == 'left') {
+                              _leftId = uid;
+                              _activeSlot = 'right';
+                            } else {
+                              _rightId = uid;
+                              _activeSlot = 'left';
+                            }
+                          });
+                        },
+                );
+              }).toList(),
+            ),
+          ),
+          const SizedBox(height: 16),
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton(
+              onPressed: (_leftId != null && _rightId != null)
+                  ? () => Navigator.pop(context, {'left': _leftId, 'right': _rightId})
+                  : null,
+              child: const Text('Compare'),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -3801,6 +4469,7 @@ final submissions = await supabase
 
     final users = await supabase.from('users').select();
     final streaks = await fetchGroupStreaks(group['id']);
+    final wins = await fetchGroupWinCounts(group['id']);
 
     final results = <Map<String, dynamic>>[];
 
@@ -3831,14 +4500,19 @@ final submissions = await supabase
       results.add({
         'username': user['username'],
         'role': member['role'],
+        'wins': wins[userId] ?? 0,
         'total_score': totalScore,
         'streak': streaks[userId] ?? 0,
       });
     }
 
-    results.sort(
-      (a, b) => b['total_score'].compareTo(a['total_score']),
-    );
+    // Rank by days won (the app's actual scoring model); raw judge points
+    // only break ties between people with the same win count.
+    results.sort((a, b) {
+      final winDiff = (b['wins'] as int).compareTo(a['wins'] as int);
+      if (winDiff != 0) return winDiff;
+      return (b['total_score'] as int).compareTo(a['total_score'] as int);
+    });
 
     return results;
   }
@@ -3887,8 +4561,8 @@ return ListView(
         ),
         subtitle: Text(winner['username']),
         trailing: _AnimatedCount(
-          value: winner['total_score'] as int,
-          suffix: ' pts',
+          value: winner['wins'] as int,
+          suffix: (winner['wins'] as int) == 1 ? ' win' : ' wins',
           style: const TextStyle(
             fontSize: 18,
             fontWeight: FontWeight.bold,
@@ -3926,11 +4600,15 @@ return ListView(
                 ),
           title: Text(row['username']),
           subtitle: Text(
-            (row['streak'] ?? 0) > 0 ? '${row['role']} • 🔥 ${row['streak']}' : row['role'],
+            [
+              row['role'] as String,
+              if ((row['streak'] ?? 0) > 0) '🔥 ${row['streak']}',
+              '${row['total_score']} pts',
+            ].join(' • '),
           ),
           trailing: _AnimatedCount(
-            value: row['total_score'] as int,
-            suffix: ' pts',
+            value: row['wins'] as int,
+            suffix: (row['wins'] as int) == 1 ? ' win' : ' wins',
             style: const TextStyle(
               fontSize: 18,
               fontWeight: FontWeight.bold,
@@ -3973,16 +4651,15 @@ class WeeklyRecapPage extends StatelessWidget {
         allScores.where((sc) => submissionIds.contains(sc['submission_id'])).toList();
 
     final users = await supabase.from('users').select();
+    final winsByUser =
+        await fetchGroupWinCounts(group['id'], from: startOfWeek, to: endOfWeek);
 
     final submissionCountByUser = <String, int>{};
     final totalsByUser = <String, int>{};
-    final byDay = <String, List<dynamic>>{};
 
     for (final s in submissions) {
       final uid = s['user_id'] as String;
       submissionCountByUser[uid] = (submissionCountByUser[uid] ?? 0) + 1;
-      final date = DateTime.parse(s['submitted_at'].toString());
-      byDay.putIfAbsent(_dateKeyForStreak(date), () => []).add(s);
     }
 
     for (final sc in weekScores) {
@@ -3993,31 +4670,6 @@ class WeeklyRecapPage extends StatelessWidget {
       if (submission.isEmpty) continue;
       final uid = submission['user_id'] as String;
       totalsByUser[uid] = (totalsByUser[uid] ?? 0) + ((sc['score'] ?? 0) as int);
-    }
-
-    final winsByUser = <String, int>{};
-    for (final daySubs in byDay.values) {
-      final dayTotals = <String, int>{};
-      final submittedTimes = <String, String>{};
-      for (final s in daySubs) {
-        final uid = s['user_id'] as String;
-        submittedTimes[uid] = s['submitted_at'].toString();
-        final subScores = weekScores.where((sc) => sc['submission_id'] == s['id']);
-        for (final sc in subScores) {
-          dayTotals[uid] = (dayTotals[uid] ?? 0) + ((sc['score'] ?? 0) as int);
-        }
-      }
-      if (dayTotals.isEmpty) continue;
-
-      final maxScore = dayTotals.values.reduce((a, b) => a > b ? a : b);
-      final topIds = dayTotals.entries
-          .where((e) => e.value == maxScore)
-          .map((e) => e.key)
-          .toList()
-        ..sort((a, b) => submittedTimes[a]!.compareTo(submittedTimes[b]!));
-
-      final winnerId = topIds.first;
-      winsByUser[winnerId] = (winsByUser[winnerId] ?? 0) + 1;
     }
 
     final allUserIds = {
@@ -4039,7 +4691,12 @@ class WeeklyRecapPage extends StatelessWidget {
       };
     }).toList();
 
-    rows.sort((a, b) => (b['total_score'] as int).compareTo(a['total_score'] as int));
+    // Rank by wins this week, raw points only break ties.
+    rows.sort((a, b) {
+      final winDiff = (b['wins'] as int).compareTo(a['wins'] as int);
+      if (winDiff != 0) return winDiff;
+      return (b['total_score'] as int).compareTo(a['total_score'] as int);
+    });
 
     return {
       'startOfWeek': startOfWeek,
@@ -4113,10 +4770,10 @@ class WeeklyRecapPage extends StatelessWidget {
                         : _MemberAvatar(username: row['username'] ?? '?', color: color),
                     title: Text(row['username'] ?? 'Unknown'),
                     subtitle: Text(
-                      '${row['submissions']} submitted • ${row['wins']} won this week',
+                      '${row['submissions']} submitted • ${row['total_score']} pts',
                     ),
                     trailing: Text(
-                      '${row['total_score']} pts',
+                      (row['wins'] as int) == 1 ? '1 win' : '${row['wins']} wins',
                       style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
                     ),
                   ),
@@ -5332,7 +5989,7 @@ Color hexToColor(String hex) {
 }
 
 FaIconData roleIconData(String? role) {
-  if (role == 'owner') return FontAwesomeIcons.crown;
+  if (role == 'owner') return FontAwesomeIcons.userGear;
   if (role == 'player') return FontAwesomeIcons.handFist;
   if (role == 'judge') return FontAwesomeIcons.scaleBalanced;
   return FontAwesomeIcons.userCircle;
@@ -5884,36 +6541,47 @@ class _SplashScreenState extends State<SplashScreen> {
       if (!mounted) return;
       setState(() {});
       _controller.play();
+    }).catchError((_) {
+      // Video failed to load/decode — don't strand the user on a black screen.
+      _proceed();
     });
 
-    _controller.addListener(() async {
+    _controller.addListener(() {
       final isFinished = !_controller.value.isPlaying &&
           _controller.value.position >= _controller.value.duration &&
           _controller.value.duration > Duration.zero;
 
-     if (isFinished && !_navigated) {
-        _navigated = true;
-        final prefs = await SharedPreferences.getInstance();
-        final onboardingComplete = prefs.getBool('onboarding_complete') ?? false;
-        final termsAccepted = prefs.getBool('terms_accepted') ?? false;
-
-        if (!mounted) return;
-
-        Widget nextPage;
-        if (!onboardingComplete) {
-          nextPage = const OnboardingPage();
-        } else if (!termsAccepted) {
-          nextPage = const OnboardingPage(skipToTerms: true);
-        } else {
-          nextPage = const AuthGate();
-        }
-
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(builder: (_) => nextPage),
-        );
-      }
+      if (isFinished) _proceed();
     });
+
+    // Safety net: if the video never finishes for any reason (stuck decoder,
+    // slow emulator, etc.), don't let the splash hang forever.
+    Future.delayed(const Duration(seconds: 6), _proceed);
+  }
+
+  Future<void> _proceed() async {
+    if (_navigated) return;
+    _navigated = true;
+
+    final prefs = await SharedPreferences.getInstance();
+    final onboardingComplete = prefs.getBool('onboarding_complete') ?? false;
+    final termsAccepted = prefs.getBool('terms_accepted') ?? false;
+
+    if (!mounted) return;
+
+    Widget nextPage;
+    if (!onboardingComplete) {
+      nextPage = const OnboardingPage();
+    } else if (!termsAccepted) {
+      nextPage = const OnboardingPage(skipToTerms: true);
+    } else {
+      nextPage = const AuthGate();
+    }
+
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(builder: (_) => nextPage),
+    );
   }
 
   @override
@@ -5925,7 +6593,7 @@ class _SplashScreenState extends State<SplashScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFF0A0A0A),
+      backgroundColor: kBgColor,
 body: _controller.value.isInitialized
           ? SizedBox.expand(
               child: FittedBox(
@@ -6599,7 +7267,7 @@ final Map<String, Future<String>> _signedUrlCache = {};
                               decoration: BoxDecoration(
                                 color: isMe
                                     ? const Color(0xFFE10600)
-                                    : const Color(0xFF1A1A1A),
+                                    : kSurfaceColor,
                                 borderRadius: BorderRadius.circular(16),
                               ),
                            child: Column(
@@ -7994,7 +8662,7 @@ class _OnboardingPageState extends State<OnboardingPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFF0A0A0A),
+      backgroundColor: kBgColor,
       body: SafeArea(
         child: Column(
           children: [
