@@ -50,6 +50,85 @@ const kStatOptions = [
 
 const kDefaultStatKeys = ['wins', 'currentStreak', 'longestStreak'];
 
+class StoreItemDef {
+  final String key;
+  final String name;
+  final int cost;
+  final String description;
+  final FaIconData icon;
+  final bool comingSoon;
+
+  const StoreItemDef({
+    required this.key,
+    required this.name,
+    required this.cost,
+    required this.description,
+    required this.icon,
+    this.comingSoon = false,
+  });
+}
+
+const kStoreItems = [
+  StoreItemDef(
+    key: 'custom_title',
+    name: 'Custom Title',
+    cost: 20,
+    description: 'Unlock a cosmetic badge next to your name.',
+    icon: FontAwesomeIcons.tag,
+  ),
+  StoreItemDef(
+    key: 'score_insurance',
+    name: 'Score Insurance',
+    cost: 12,
+    description: 'Add a visible +1 to today\'s score (once you\'ve submitted).',
+    icon: FontAwesomeIcons.shieldHalved,
+  ),
+  StoreItemDef(
+    key: 'streak_shield',
+    name: 'Streak Shield',
+    cost: 15,
+    description: 'Forgive one missed day without breaking your streak.',
+    icon: FontAwesomeIcons.fire,
+  ),
+  StoreItemDef(
+    key: 'dare_card',
+    name: 'Dare Card',
+    cost: 25,
+    description: 'Force tomorrow to be a themed Challenge Day for the group.',
+    icon: FontAwesomeIcons.diceD6,
+  ),
+  StoreItemDef(
+    key: 'anonymous_submission',
+    name: 'Anonymous Submission',
+    cost: 10,
+    description: 'Hide your name on today\'s submission (once you\'ve submitted).',
+    icon: FontAwesomeIcons.userSecret,
+  ),
+  StoreItemDef(
+    key: 'freeze',
+    name: 'Freeze',
+    cost: 30,
+    description: 'Force a rival to skip a day. Coming soon.',
+    icon: FontAwesomeIcons.snowflake,
+    comingSoon: true,
+  ),
+];
+
+Future<int> fetchCoinBalance(String groupId, String userId) async {
+  final supabase = Supabase.instance.client;
+  final rows = await supabase
+      .from('coin_transactions')
+      .select('amount')
+      .eq('group_id', groupId)
+      .eq('user_id', userId);
+
+  var total = 0;
+  for (final r in rows) {
+    total += (r['amount'] ?? 0) as int;
+  }
+  return total;
+}
+
 class DoodleBackground extends StatelessWidget {
   const DoodleBackground({super.key});
 
@@ -740,6 +819,53 @@ Future<Map<String, int>> fetchGroupDisqualificationCounts(String groupId) async 
 /// breaking ties) gets credit for one win. This is the app's scoring model —
 /// a daily win is worth 1 point, not the raw judge score total, which only
 /// decides who wins that individual day.
+class DayOutcome {
+  final Map<String, int> totals;
+  final String? winnerId;
+  final Set<String> judgeIds;
+
+  const DayOutcome({required this.totals, required this.winnerId, required this.judgeIds});
+}
+
+/// Shared per-day scoring computation: totals per submitter, the winner
+/// (highest total, earliest submission breaking ties), and the set of real
+/// judges (excludes synthetic Score Insurance rows, which have no judge_id
+/// and must never count toward judging-coin payouts). Operates on an
+/// already-fetched day's submissions plus the full scores list for the
+/// range they came from — callers own the fetching/bucketing so this stays
+/// a pure, reusable computation rather than another duplicated DB round trip.
+DayOutcome computeDayOutcome(List<dynamic> daySubmissions, List<dynamic> allScores) {
+  final totals = <String, int>{};
+  final submittedTimes = <String, String>{};
+  final judgeIds = <String>{};
+
+  for (final s in daySubmissions) {
+    final uid = s['user_id'] as String;
+    submittedTimes[uid] = s['submitted_at'].toString();
+    final subScores = allScores.where((sc) => sc['submission_id'] == s['id']);
+    for (final sc in subScores) {
+      totals[uid] = (totals[uid] ?? 0) + ((sc['score'] ?? 0) as int);
+      final judgeId = sc['judge_id'];
+      if (judgeId != null && sc['source'] != 'insurance') {
+        judgeIds.add(judgeId as String);
+      }
+    }
+  }
+
+  if (totals.isEmpty) {
+    return DayOutcome(totals: totals, winnerId: null, judgeIds: judgeIds);
+  }
+
+  final maxScore = totals.values.reduce((a, b) => a > b ? a : b);
+  final topUserIds = totals.entries
+      .where((e) => e.value == maxScore)
+      .map((e) => e.key)
+      .toList()
+    ..sort((a, b) => submittedTimes[a]!.compareTo(submittedTimes[b]!));
+
+  return DayOutcome(totals: totals, winnerId: topUserIds.first, judgeIds: judgeIds);
+}
+
 Future<Map<String, int>> fetchGroupWinCounts(
   String groupId, {
   DateTime? from,
@@ -769,29 +895,10 @@ Future<Map<String, int>> fetchGroupWinCounts(
   final wins = <String, int>{};
 
   for (final daySubs in byDay.values) {
-    final totals = <String, int>{};
-    final submittedTimes = <String, String>{};
-
-    for (final s in daySubs) {
-      final uid = s['user_id'] as String;
-      submittedTimes[uid] = s['submitted_at'].toString();
-      final subScores = scores.where((sc) => sc['submission_id'] == s['id']);
-      for (final sc in subScores) {
-        totals[uid] = (totals[uid] ?? 0) + ((sc['score'] ?? 0) as int);
-      }
+    final outcome = computeDayOutcome(daySubs, scores);
+    if (outcome.winnerId != null) {
+      wins[outcome.winnerId!] = (wins[outcome.winnerId!] ?? 0) + 1;
     }
-
-    if (totals.isEmpty) continue;
-
-    final maxScore = totals.values.reduce((a, b) => a > b ? a : b);
-    final topUserIds = totals.entries
-        .where((e) => e.value == maxScore)
-        .map((e) => e.key)
-        .toList()
-      ..sort((a, b) => submittedTimes[a]!.compareTo(submittedTimes[b]!));
-
-    final winnerId = topUserIds.first;
-    wins[winnerId] = (wins[winnerId] ?? 0) + 1;
   }
 
   return wins;
@@ -809,7 +916,18 @@ Future<Map<String, dynamic>?> fetchGroupLeader(String groupId) async {
   final users = await supabase.from('users').select().eq('id', leaderId);
   final leaderName = users.isNotEmpty ? users.first['username'] : 'Unknown';
 
-  return {'name': leaderName, 'score': leaderWins};
+  final membership = await supabase
+      .from('group_members')
+      .select('custom_title')
+      .eq('group_id', groupId)
+      .eq('user_id', leaderId)
+      .maybeSingle();
+
+  return {
+    'name': leaderName,
+    'score': leaderWins,
+    'custom_title': membership?['custom_title'],
+  };
 }
 
 Future<int> fetchGroupUnreadCount(String groupId) async {
@@ -853,12 +971,19 @@ Future<Map<String, int>> fetchGroupStreaks(String groupId) async {
       .from('submissions')
       .select()
       .eq('group_id', groupId);
+  final shields = await supabase.from('streak_shields').select().eq('group_id', groupId);
 
   final datesByUser = <String, Set<String>>{};
   for (final s in submissions) {
     final userId = s['user_id'] as String;
     final date = DateTime.parse(s['submitted_at'].toString());
     datesByUser.putIfAbsent(userId, () => {}).add(_dateKeyForStreak(date));
+  }
+  // A purchased Streak Shield counts its covered date as if it were
+  // submitted, so one missed day doesn't reset the streak.
+  for (final shield in shields) {
+    final userId = shield['user_id'] as String;
+    datesByUser.putIfAbsent(userId, () => {}).add(shield['covered_date'] as String);
   }
 
   final today = DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day);
@@ -889,6 +1014,7 @@ Future<Map<String, int>> fetchGroupLongestStreaks(String groupId) async {
       .from('submissions')
       .select()
       .eq('group_id', groupId);
+  final shields = await supabase.from('streak_shields').select().eq('group_id', groupId);
 
   final datesByUser = <String, Set<DateTime>>{};
   for (final s in submissions) {
@@ -897,6 +1023,10 @@ Future<Map<String, int>> fetchGroupLongestStreaks(String groupId) async {
     datesByUser
         .putIfAbsent(userId, () => {})
         .add(DateTime(date.year, date.month, date.day));
+  }
+  for (final shield in shields) {
+    final userId = shield['user_id'] as String;
+    datesByUser.putIfAbsent(userId, () => {}).add(DateTime.parse(shield['covered_date'] as String));
   }
 
   final longest = <String, int>{};
@@ -1271,7 +1401,9 @@ class _HomePageState extends State<HomePage> {
                               children: [
                                 if (leader != null)
                                   _groupCardChip(
-                                    '🏆 ${leader['name']} · ${leader['score']} wins',
+                                    (leader['custom_title'] as String?)?.isNotEmpty == true
+                                        ? '🏆 ${leader['name']} "${leader['custom_title']}" · ${leader['score']} wins'
+                                        : '🏆 ${leader['name']} · ${leader['score']} wins',
                                     accent: kAccentGold,
                                   ),
                                 if (myStreak > 0)
@@ -1585,6 +1717,7 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
     _maybeShowChallengePopup();
     _maybeShowWinCelebration();
     _loadSelectedStatKeys();
+    _settleCoinPayouts(widget.group['id']);
   }
 
   Future<void> _loadSelectedStatKeys() async {
@@ -1592,6 +1725,110 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
     final saved = prefs.getStringList('stats_bar_keys');
     if (saved == null || saved.isEmpty || !mounted) return;
     setState(() => _selectedStatKeys = saved.toSet());
+  }
+
+  /// Pays out coins for every completed-but-unsettled day (won/streak/judging)
+  /// since the group's last settlement. Fire-and-forget, idempotent (safe to
+  /// call every time the dashboard loads — days already settled are no-ops
+  /// via the DB's partial unique index), uses UTC day boundaries throughout
+  /// so payouts don't depend on which member's device happens to trigger it.
+  Future<void> _settleCoinPayouts(String groupId) async {
+    try {
+      final supabase = Supabase.instance.client;
+
+      final groupRow = await supabase
+          .from('groups')
+          .select('coins_settled_through')
+          .eq('id', groupId)
+          .single();
+
+      final nowUtc = DateTime.now().toUtc();
+      final yesterday = DateTime.utc(nowUtc.year, nowUtc.month, nowUtc.day)
+          .subtract(const Duration(days: 1));
+
+      final settledThroughRaw = groupRow['coins_settled_through'] as String?;
+      if (settledThroughRaw == null) {
+        await supabase
+            .from('groups')
+            .update({'coins_settled_through': _dateKeyForStreak(yesterday)}).eq('id', groupId);
+        return;
+      }
+
+      final settledThrough = DateTime.parse(settledThroughRaw);
+      final startDay = DateTime.utc(
+        settledThrough.year,
+        settledThrough.month,
+        settledThrough.day,
+      ).add(const Duration(days: 1));
+
+      if (startDay.isAfter(yesterday)) return;
+
+      final submissions = await supabase.from('submissions').select().eq('group_id', groupId);
+      final submissionIds = submissions.map((s) => s['id']).toList();
+      final scores = submissionIds.isEmpty
+          ? <dynamic>[]
+          : await supabase.from('scores').select().inFilter('submission_id', submissionIds);
+
+      final byDay = <String, List<dynamic>>{};
+      final datesByUser = <String, Set<DateTime>>{};
+      for (final s in submissions) {
+        final date = DateTime.parse(s['submitted_at'].toString()).toUtc();
+        final dayOnly = DateTime.utc(date.year, date.month, date.day);
+        byDay.putIfAbsent(_dateKeyForStreak(dayOnly), () => []).add(s);
+        datesByUser.putIfAbsent(s['user_id'] as String, () => {}).add(dayOnly);
+      }
+
+      int streakEndingOn(String userId, DateTime day) {
+        final dates = datesByUser[userId] ?? {};
+        if (!dates.contains(day)) return 0;
+        var streak = 0;
+        var cursor = day;
+        while (dates.contains(cursor)) {
+          streak++;
+          cursor = cursor.subtract(const Duration(days: 1));
+        }
+        return streak;
+      }
+
+      Future<void> award(String userId, int amount, String reason, String dayKey) {
+        return supabase.from('coin_transactions').upsert(
+          {
+            'group_id': groupId,
+            'user_id': userId,
+            'amount': amount,
+            'reason': reason,
+            'reference_date': dayKey,
+          },
+          onConflict: 'group_id,user_id,reason,reference_date',
+          ignoreDuplicates: true,
+        );
+      }
+
+      for (var day = startDay; !day.isAfter(yesterday); day = day.add(const Duration(days: 1))) {
+        final dayKey = _dateKeyForStreak(day);
+        final daySubs = byDay[dayKey] ?? [];
+        if (daySubs.isEmpty) continue;
+
+        final outcome = computeDayOutcome(daySubs, scores);
+
+        if (outcome.winnerId != null) {
+          await award(outcome.winnerId!, 10, 'daily_win', dayKey);
+          if (streakEndingOn(outcome.winnerId!, day) >= 3) {
+            await award(outcome.winnerId!, 5, 'streak_bonus', dayKey);
+          }
+        }
+
+        for (final judgeId in outcome.judgeIds) {
+          await award(judgeId, 5, 'judging', dayKey);
+        }
+      }
+
+      await supabase
+          .from('groups')
+          .update({'coins_settled_through': _dateKeyForStreak(yesterday)}).eq('id', groupId);
+    } catch (e, st) {
+      FirebaseCrashlytics.instance.recordError(e, st, fatal: false);
+    }
   }
 
   Future<void> _maybeShowWinCelebration() async {
@@ -1665,10 +1902,14 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
 
   Future<void> _maybeShowChallengePopup() async {
     final challengesPerWeek = widget.group['challenges_per_week'] ?? 0;
-    if (challengesPerWeek <= 0) return;
+    final forcedDate = widget.group['forced_challenge_date'] as String?;
+    final forcedPrompt = widget.group['forced_challenge_prompt'] as String?;
 
     final today = DateTime.now();
-    if (!isChallengeDay(widget.group['id'], challengesPerWeek, today)) return;
+    if (!isChallengeDay(widget.group['id'], challengesPerWeek, today,
+        forcedChallengeDate: forcedDate)) {
+      return;
+    }
 
     final prefs = await SharedPreferences.getInstance();
     final todayKey = '${today.year}-${today.month}-${today.day}';
@@ -1679,7 +1920,8 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
 
     if (!mounted) return;
 
-    final text = challengeTextFor(widget.group['id'], today);
+    final text = challengeTextFor(widget.group['id'], today,
+        forcedChallengeDate: forcedDate, forcedChallengePrompt: forcedPrompt);
 
     HapticFeedback.mediumImpact();
 
@@ -1833,6 +2075,7 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
         'username': user['username'],
         'role': member['role'],
         'streak': streaks[member['user_id']] ?? 0,
+        'custom_title': member['custom_title'],
       };
     }).toList();
   }
@@ -2125,6 +2368,7 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
         'hasScore': submissionScores.isNotEmpty,
         'isDisqualified': isDisqualified,
         'totalScore': totalScore,
+        'custom_title': member['custom_title'],
       };
     }).toList();
   }
@@ -2165,9 +2409,13 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
     final notices = <Map<String, dynamic>>[];
 
     final challengesPerWeek = widget.group['challenges_per_week'] ?? 0;
+    final forcedDate = widget.group['forced_challenge_date'] as String?;
+    final forcedPrompt = widget.group['forced_challenge_prompt'] as String?;
     final today = DateTime.now();
-    if (isChallengeDay(widget.group['id'], challengesPerWeek, today)) {
-      final text = challengeTextFor(widget.group['id'], today);
+    if (isChallengeDay(widget.group['id'], challengesPerWeek, today,
+        forcedChallengeDate: forcedDate)) {
+      final text = challengeTextFor(widget.group['id'], today,
+          forcedChallengeDate: forcedDate, forcedChallengePrompt: forcedPrompt);
       notices.add({'text': '🎯 Today\'s Challenge: $text'});
     }
 
@@ -2952,8 +3200,15 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
     final canUpload = !isJudging || _judgeAlsoPlays;
     final isHybridJudge = isJudging && _judgeAlsoPlays;
     final challengesPerWeek = widget.group['challenges_per_week'] ?? 0;
-    final isTodayChallenge = isChallengeDay(widget.group['id'], challengesPerWeek, DateTime.now());
-    final challengeText = isTodayChallenge ? challengeTextFor(widget.group['id'], DateTime.now()) : null;
+    final forcedDate = widget.group['forced_challenge_date'] as String?;
+    final forcedPrompt = widget.group['forced_challenge_prompt'] as String?;
+    final isTodayChallenge = isChallengeDay(
+        widget.group['id'], challengesPerWeek, DateTime.now(),
+        forcedChallengeDate: forcedDate);
+    final challengeText = isTodayChallenge
+        ? challengeTextFor(widget.group['id'], DateTime.now(),
+            forcedChallengeDate: forcedDate, forcedChallengePrompt: forcedPrompt)
+        : null;
 
     return Scaffold(
       appBar: AppBar(
@@ -2999,6 +3254,13 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
                     builder: (_) => WeeklyRecapPage(group: widget.group),
                   ),
                 );
+              } else if (value == 'store') {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => StorePage(group: widget.group),
+                  ),
+                ).then((_) => setState(() {}));
               } else if (value == 'profile') {
                 Navigator.push(
                   context,
@@ -3035,6 +3297,10 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
               const PopupMenuItem(
                 value: 'weekly_recap',
                 child: Text('Weekly Recap'),
+              ),
+              const PopupMenuItem(
+                value: 'store',
+                child: Text('🪙 Store'),
               ),
              if (isOwner) ...[
                 const PopupMenuItem(
@@ -3129,7 +3395,9 @@ body: Stack(
                                 children: [
                                   if (leader != null)
                                     _headerChip(
-                                      '🏆 ${leader['name']} · ${leader['score']} wins',
+                                      (leader['custom_title'] as String?)?.isNotEmpty == true
+                                          ? '🏆 ${leader['name']} "${leader['custom_title']}" · ${leader['score']} wins'
+                                          : '🏆 ${leader['name']} · ${leader['score']} wins',
                                       accent: kAccentGold,
                                     ),
                                   if (myStreak > 0)
@@ -3265,9 +3533,21 @@ body: Stack(
                                   roleIcon(player['role'], size: 18, color: Colors.white70),
                                   const SizedBox(width: 10),
                                   Expanded(
-                                    child: Text(
-                                      player['username'] ?? 'Unknown',
-                                      overflow: TextOverflow.ellipsis,
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Text(
+                                          player['username'] ?? 'Unknown',
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                        if ((player['custom_title'] as String?)?.isNotEmpty == true)
+                                          Text(
+                                            player['custom_title'],
+                                            style: const TextStyle(fontSize: 10, color: kAccentGold),
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                      ],
                                     ),
                                   ),
                                   _buildStatusChip(player),
@@ -3410,6 +3690,16 @@ body: Stack(
                                           style: const TextStyle(fontSize: 10),
                                           overflow: TextOverflow.ellipsis,
                                         ),
+                                        if ((m['custom_title'] as String?)?.isNotEmpty == true)
+                                          Text(
+                                            m['custom_title'],
+                                            style: const TextStyle(
+                                              fontSize: 8,
+                                              color: kAccentGold,
+                                              fontStyle: FontStyle.italic,
+                                            ),
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
                                       ],
                                     ),
                                   );
@@ -4041,7 +4331,7 @@ final groupData = await supabase
       result.add({
         'id': submission['id'],
         'user_id': submission['user_id'],
-        'username': anonymousJudging ? null : uploader['username'],
+        'username': (anonymousJudging || submission['is_anonymous'] == true) ? null : uploader['username'],
         'photo_url': submission['photo_url'],
         'signed_url': signedUrl,
         'my_score': existingScores.isNotEmpty ? existingScores.first['score'] : null,
@@ -4099,9 +4389,15 @@ Future<void> saveScore(String submissionId, int score) async {
   @override
   Widget build(BuildContext context) {
     final challengesPerWeek = widget.group['challenges_per_week'] ?? 0;
+    final forcedDate = widget.group['forced_challenge_date'] as String?;
+    final forcedPrompt = widget.group['forced_challenge_prompt'] as String?;
     final today = DateTime.now();
-    final isTodayChallenge = isChallengeDay(widget.group['id'], challengesPerWeek, today);
-    final challengeText = isTodayChallenge ? challengeTextFor(widget.group['id'], today) : null;
+    final isTodayChallenge = isChallengeDay(widget.group['id'], challengesPerWeek, today,
+        forcedChallengeDate: forcedDate);
+    final challengeText = isTodayChallenge
+        ? challengeTextFor(widget.group['id'], today,
+            forcedChallengeDate: forcedDate, forcedChallengePrompt: forcedPrompt)
+        : null;
 
     return Scaffold(
       appBar: AppBar(
@@ -4484,6 +4780,7 @@ class TodayPhotosPage extends StatelessWidget {
           'score': score['score'],
           'disqualified': score['disqualified'],
           'reason': score['reason'],
+          'source': score['source'] ?? 'judge',
         });
 
         totalScore += (score['score'] ?? 0) as int;
@@ -4496,7 +4793,7 @@ class TodayPhotosPage extends StatelessWidget {
 
       result.add({
         'signed_url': signedUrl,
-        'username': anonymousJudging ? null : uploader['username'],
+        'username': (anonymousJudging || submission['is_anonymous'] == true) ? null : uploader['username'],
         'total_score': totalScore,
         'is_disqualified': isDisqualified,
         'disqualification_reason': disqualificationReason,
@@ -4635,6 +4932,7 @@ final submissions = await supabase
         'wins': wins[userId] ?? 0,
         'total_score': totalScore,
         'streak': streaks[userId] ?? 0,
+        'custom_title': member['custom_title'],
       });
     }
 
@@ -4691,7 +4989,11 @@ return ListView(
   'Current Leader',
           style: TextStyle(fontWeight: FontWeight.bold),
         ),
-        subtitle: Text(winner['username']),
+        subtitle: Text(
+          (winner['custom_title'] as String?)?.isNotEmpty == true
+              ? '${winner['username']} · "${winner['custom_title']}"'
+              : winner['username'],
+        ),
         trailing: _AnimatedCount(
           value: winner['wins'] as int,
           suffix: (winner['wins'] as int) == 1 ? ' win' : ' wins',
@@ -4730,7 +5032,11 @@ return ListView(
                   username: row['username'] ?? '?',
                   color: color,
                 ),
-          title: Text(row['username']),
+          title: Text(
+            (row['custom_title'] as String?)?.isNotEmpty == true
+                ? '${row['username']} · "${row['custom_title']}"'
+                : row['username'],
+          ),
           subtitle: Text(
             [
               row['role'] as String,
@@ -4981,6 +5287,7 @@ for (final score in submissionScores) {
     'score': score['score'],
     'disqualified': score['disqualified'],
     'reason': score['reason'],
+    'source': score['source'] ?? 'judge',
   });
 
   totalScore += (score['score'] ?? 0) as int;
@@ -5364,6 +5671,45 @@ class _PhotoCarouselState extends State<_PhotoCarousel> {
                         ...judgeDetails.asMap().entries.map((entry) {
                           final judge = entry.value;
                           final disqualified = judge['disqualified'] == true;
+
+                          if (judge['source'] == 'insurance') {
+                            return Padding(
+                              padding: const EdgeInsets.only(bottom: 8),
+                              child: Row(
+                                children: [
+                                  Container(
+                                    width: 28,
+                                    height: 28,
+                                    alignment: Alignment.center,
+                                    decoration: BoxDecoration(
+                                      color: kAccentGold.withOpacity(0.15),
+                                      shape: BoxShape.circle,
+                                    ),
+                                    child: const FaIcon(
+                                      FontAwesomeIcons.shieldHalved,
+                                      size: 13,
+                                      color: kAccentGold,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 10),
+                                  const Expanded(
+                                    child: Text('Score Insurance', style: TextStyle(color: kAccentGold)),
+                                  ),
+                                  Row(
+                                    children: [
+                                      const FaIcon(FontAwesomeIcons.star, size: 13, color: kAccentGold),
+                                      const SizedBox(width: 4),
+                                      Text(
+                                        '+${judge['score']}',
+                                        style: const TextStyle(fontWeight: FontWeight.bold, color: kAccentGold),
+                                      ),
+                                    ],
+                                  ),
+                                ],
+                              ),
+                            );
+                          }
+
                           return Padding(
                             padding: const EdgeInsets.only(bottom: 8),
                             child: Row(
@@ -6094,6 +6440,350 @@ class _PhotoCropPageState extends State<_PhotoCropPage> {
   }
 }
 
+class StorePage extends StatefulWidget {
+  final dynamic group;
+  const StorePage({super.key, required this.group});
+
+  @override
+  State<StorePage> createState() => _StorePageState();
+}
+
+class _StorePageState extends State<StorePage> {
+  final supabase = Supabase.instance.client;
+  bool _loading = true;
+  bool _busy = false;
+  int _balance = 0;
+  Map<String, dynamic>? _todaySubmission;
+  String? _customTitle;
+  bool _submittedYesterday = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() => _loading = true);
+    final user = supabase.auth.currentUser;
+    if (user == null) return;
+
+    final groupId = widget.group['id'];
+
+    final today = DateTime.now();
+    final startOfDay = DateTime(today.year, today.month, today.day);
+    final endOfDay = startOfDay.add(const Duration(days: 1));
+    final startOfYesterday = startOfDay.subtract(const Duration(days: 1));
+
+    final results = await Future.wait<dynamic>([
+      fetchCoinBalance(groupId, user.id),
+      supabase
+          .from('submissions')
+          .select()
+          .eq('group_id', groupId)
+          .eq('user_id', user.id)
+          .gte('submitted_at', startOfDay.toIso8601String())
+          .lt('submitted_at', endOfDay.toIso8601String())
+          .maybeSingle(),
+      supabase
+          .from('group_members')
+          .select('custom_title')
+          .eq('group_id', groupId)
+          .eq('user_id', user.id)
+          .maybeSingle(),
+      supabase
+          .from('submissions')
+          .select()
+          .eq('group_id', groupId)
+          .eq('user_id', user.id)
+          .gte('submitted_at', startOfYesterday.toIso8601String())
+          .lt('submitted_at', startOfDay.toIso8601String())
+          .maybeSingle(),
+    ]);
+
+    if (!mounted) return;
+    setState(() {
+      _balance = results[0] as int;
+      _todaySubmission = results[1] as Map<String, dynamic>?;
+      _customTitle = (results[2] as Map<String, dynamic>?)?['custom_title'] as String?;
+      _submittedYesterday = results[3] != null;
+      _loading = false;
+    });
+  }
+
+  Future<void> _purchase(StoreItemDef item, Future<void> Function() applyEffect) async {
+    final user = supabase.auth.currentUser;
+    if (user == null || _busy) return;
+
+    setState(() => _busy = true);
+    try {
+      final freshBalance = await fetchCoinBalance(widget.group['id'], user.id);
+      if (freshBalance < item.cost) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Not enough coins')),
+        );
+        return;
+      }
+
+      await supabase.from('coin_transactions').insert({
+        'group_id': widget.group['id'],
+        'user_id': user.id,
+        'amount': -item.cost,
+        'reason': 'purchase:${item.key}',
+      });
+
+      await applyEffect();
+
+      analytics.logEvent(name: 'store_purchase', parameters: {'item': item.key});
+      HapticFeedback.mediumImpact();
+      playFeedbackSound();
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('${item.name} purchased!')),
+      );
+      await _load();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(friendlyError(e))),
+      );
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _buyCustomTitle() async {
+    final controller = TextEditingController(text: _customTitle ?? '');
+    final title = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Custom Title'),
+        content: TextField(
+          controller: controller,
+          maxLength: 24,
+          decoration: const InputDecoration(hintText: 'e.g. The Undefeated'),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('Cancel')),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(dialogContext, controller.text.trim()),
+            child: const Text('Buy'),
+          ),
+        ],
+      ),
+    );
+
+    if (title == null || title.isEmpty || !mounted) return;
+
+    await _purchase(kStoreItems.firstWhere((i) => i.key == 'custom_title'), () async {
+      await supabase
+          .from('group_members')
+          .update({'custom_title': title})
+          .eq('group_id', widget.group['id'])
+          .eq('user_id', supabase.auth.currentUser!.id);
+    });
+  }
+
+  Future<void> _buyScoreInsurance() async {
+    final submission = _todaySubmission;
+    if (submission == null) return;
+
+    await _purchase(kStoreItems.firstWhere((i) => i.key == 'score_insurance'), () async {
+      await supabase.from('scores').insert({
+        'submission_id': submission['id'],
+        'judge_id': null,
+        'score': 1,
+        'disqualified': false,
+        'source': 'insurance',
+      });
+    });
+  }
+
+  Future<void> _buyStreakShield() async {
+    await _purchase(kStoreItems.firstWhere((i) => i.key == 'streak_shield'), () async {
+      final today = DateTime.now();
+      final yesterday =
+          DateTime(today.year, today.month, today.day).subtract(const Duration(days: 1));
+      await supabase.from('streak_shields').insert({
+        'group_id': widget.group['id'],
+        'user_id': supabase.auth.currentUser!.id,
+        'covered_date': _dateKeyForStreak(yesterday),
+      });
+    });
+  }
+
+  Future<void> _buyDareCard() async {
+    await _purchase(kStoreItems.firstWhere((i) => i.key == 'dare_card'), () async {
+      final tomorrow = DateTime.now().add(const Duration(days: 1));
+      final dateKey = _dateKeyForStreak(tomorrow);
+      final prompt = kChallengePrompts[Random().nextInt(kChallengePrompts.length)];
+      await supabase.from('groups').update({
+        'forced_challenge_date': dateKey,
+        'forced_challenge_prompt': prompt,
+      }).eq('id', widget.group['id']);
+      // Keep the shared group map (same instance the Dashboard reads) in
+      // sync so the override applies immediately without a full reload.
+      widget.group['forced_challenge_date'] = dateKey;
+      widget.group['forced_challenge_prompt'] = prompt;
+    });
+  }
+
+  Future<void> _buyAnonymousSubmission() async {
+    final submission = _todaySubmission;
+    if (submission == null) return;
+
+    await _purchase(kStoreItems.firstWhere((i) => i.key == 'anonymous_submission'), () async {
+      await supabase.from('submissions').update({'is_anonymous': true}).eq('id', submission['id']);
+    });
+  }
+
+  void _onBuy(StoreItemDef item) {
+    switch (item.key) {
+      case 'custom_title':
+        _buyCustomTitle();
+        break;
+      case 'score_insurance':
+        _buyScoreInsurance();
+        break;
+      case 'streak_shield':
+        _buyStreakShield();
+        break;
+      case 'dare_card':
+        _buyDareCard();
+        break;
+      case 'anonymous_submission':
+        _buyAnonymousSubmission();
+        break;
+    }
+  }
+
+  bool _canBuy(StoreItemDef item) {
+    if (item.comingSoon) return false;
+    if (_balance < item.cost) return false;
+    if (item.key == 'score_insurance' || item.key == 'anonymous_submission') {
+      return _todaySubmission != null;
+    }
+    if (item.key == 'streak_shield') {
+      return !_submittedYesterday;
+    }
+    return true;
+  }
+
+  String? _disabledReason(StoreItemDef item) {
+    if (item.comingSoon) return 'Coming soon';
+    if (_balance < item.cost) return 'Not enough coins';
+    if ((item.key == 'score_insurance' || item.key == 'anonymous_submission') &&
+        _todaySubmission == null) {
+      return 'Submit today\'s photo first';
+    }
+    if (item.key == 'streak_shield' && _submittedYesterday) {
+      return 'No missed day to cover';
+    }
+    return null;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Store')),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : RefreshIndicator(
+              onRefresh: _load,
+              child: ListView(
+                padding: EdgeInsets.fromLTRB(16, 16, 16, MediaQuery.of(context).padding.bottom + 16),
+                children: [
+                  Card(
+                    color: kAccentGold.withOpacity(0.12),
+                    child: Padding(
+                      padding: const EdgeInsets.all(20),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          const FaIcon(FontAwesomeIcons.coins, color: kAccentGold, size: 28),
+                          const SizedBox(width: 12),
+                          _AnimatedCount(
+                            value: _balance,
+                            suffix: ' coins',
+                            style: const TextStyle(
+                              fontSize: 26,
+                              fontWeight: FontWeight.bold,
+                              color: kAccentGold,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  if (_customTitle != null && _customTitle!.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 12),
+                      child: Text(
+                        'Your title: "$_customTitle"',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: Colors.white.withOpacity(0.6), fontSize: 12),
+                      ),
+                    ),
+                  for (final item in kStoreItems)
+                    Card(
+                      child: Padding(
+                        padding: const EdgeInsets.all(14),
+                        child: Row(
+                          children: [
+                            Container(
+                              width: 44,
+                              height: 44,
+                              alignment: Alignment.center,
+                              decoration: BoxDecoration(
+                                color: kAccentGold.withOpacity(0.12),
+                                shape: BoxShape.circle,
+                              ),
+                              child: FaIcon(item.icon, color: kAccentGold, size: 20),
+                            ),
+                            const SizedBox(width: 14),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(item.name, style: const TextStyle(fontWeight: FontWeight.bold)),
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    item.description,
+                                    style: TextStyle(fontSize: 12, color: Colors.white.withOpacity(0.6)),
+                                  ),
+                                  if (_disabledReason(item) != null) ...[
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      _disabledReason(item)!,
+                                      style: const TextStyle(
+                                        fontSize: 11,
+                                        color: Colors.redAccent,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ],
+                                ],
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            ElevatedButton(
+                              onPressed: (_canBuy(item) && !_busy) ? () => _onBuy(item) : null,
+                              child: Text('${item.cost}🪙'),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+    );
+  }
+}
+
 class SettingsPage extends StatefulWidget {
   final dynamic group;
 
@@ -6237,14 +6927,35 @@ Set<int> _challengeWeekdaysForWeek(String groupId, int weekIndex, int challenges
 
 /// Deterministic: same group + same calendar day always gives the same
 /// answer for every member, without needing a scheduled backend job.
-bool isChallengeDay(String groupId, int challengesPerWeek, DateTime date) {
+/// [forcedChallengeDate] is a Dare Card purchase override (groups.forced_
+/// challenge_date, 'YYYY-MM-DD') — pass the group row's value straight
+/// through; it's already loaded wherever this is called from.
+bool isChallengeDay(
+  String groupId,
+  int challengesPerWeek,
+  DateTime date, {
+  String? forcedChallengeDate,
+}) {
+  if (forcedChallengeDate != null && forcedChallengeDate == _dateKeyForStreak(date)) {
+    return true;
+  }
   if (challengesPerWeek <= 0) return false;
   final weekIndex = _daysSinceEpoch(date) ~/ 7;
   final weekdays = _challengeWeekdaysForWeek(groupId, weekIndex, challengesPerWeek);
   return weekdays.contains(date.weekday % 7);
 }
 
-String challengeTextFor(String groupId, DateTime date) {
+String challengeTextFor(
+  String groupId,
+  DateTime date, {
+  String? forcedChallengeDate,
+  String? forcedChallengePrompt,
+}) {
+  if (forcedChallengeDate != null &&
+      forcedChallengeDate == _dateKeyForStreak(date) &&
+      forcedChallengePrompt != null) {
+    return forcedChallengePrompt;
+  }
   final dayIndex = _daysSinceEpoch(date);
   final seed = (groupId.hashCode ^ (dayIndex * 104729)) & 0x7fffffff;
   return kChallengePrompts[Random(seed).nextInt(kChallengePrompts.length)];
@@ -6252,6 +6963,7 @@ String challengeTextFor(String groupId, DateTime date) {
 
 class _SettingsPageState extends State<SettingsPage> {
   bool _anonymousJudging = false;
+  bool _freezeEnabled = false;
   bool _loading = true;
   bool _saving = false;
   bool _savingName = false;
@@ -6288,6 +7000,7 @@ class _SettingsPageState extends State<SettingsPage> {
 
       setState(() {
         _anonymousJudging = group['anonymous_judging'] ?? false;
+        _freezeEnabled = group['freeze_enabled'] ?? false;
         _nameController.text = group['name'] ?? '';
         _backgroundColor = group['background_color'];
         _backgroundPhotoUrl = group['background_photo_url'];
@@ -6344,6 +7057,51 @@ try {
       // Revert the switch if saving failed
       setState(() => _anonymousJudging = !value);
 
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(friendlyError(e))),
+      );
+    }
+
+    if (!mounted) return;
+    setState(() => _saving = false);
+  }
+
+  Future<void> _updateFreezeEnabled(bool value) async {
+    final supabase = Supabase.instance.client;
+
+    setState(() {
+      _freezeEnabled = value;
+      _saving = true;
+    });
+
+    try {
+      final result = await supabase
+          .from('groups')
+          .update({'freeze_enabled': value})
+          .eq('id', widget.group['id'])
+          .select();
+
+      if (!mounted) return;
+
+      if (result.isEmpty) {
+        setState(() => _freezeEnabled = !value);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Save blocked by database permissions (no rows updated)'),
+          ),
+        );
+        setState(() => _saving = false);
+        return;
+      }
+
+      widget.group['freeze_enabled'] = value;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Setting saved')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _freezeEnabled = !value);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(friendlyError(e))),
       );
@@ -6648,6 +7406,17 @@ try {
                       ),
                       value: _anonymousJudging,
                       onChanged: _saving ? null : _updateAnonymousJudging,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Card(
+                    child: SwitchListTile(
+                      title: const Text('Freeze (Store item)'),
+                      subtitle: const Text(
+                        'Lets members spend coins to force a rival to skip a day. Off by default.',
+                      ),
+                      value: _freezeEnabled,
+                      onChanged: _saving ? null : _updateFreezeEnabled,
                     ),
                   ),
                   const SizedBox(height: 16),
