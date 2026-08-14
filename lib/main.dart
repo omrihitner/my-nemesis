@@ -130,21 +130,27 @@ Future<int> fetchCoinBalance(String groupId, String userId) async {
 }
 
 class DoodleBackground extends StatelessWidget {
-  const DoodleBackground({super.key});
+  final Color color;
+  final double spacing;
+
+  const DoodleBackground({super.key, this.color = Colors.white, this.spacing = 64});
 
   @override
   Widget build(BuildContext context) {
-    return const IgnorePointer(
+    return IgnorePointer(
       child: CustomPaint(
         size: Size.infinite,
-        painter: _DoodlePainter(),
+        painter: _DoodlePainter(color: color, spacing: spacing),
       ),
     );
   }
 }
 
 class _DoodlePainter extends CustomPainter {
-  const _DoodlePainter();
+  final Color color;
+  final double spacing;
+
+  const _DoodlePainter({required this.color, required this.spacing});
 
   static const _glyphs = [
     FontAwesomeIcons.camera,
@@ -156,8 +162,7 @@ class _DoodlePainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    const spacing = 90.0;
-    const glyphSize = 22.0;
+    const glyphSize = 19.0;
     var row = 0;
     for (double y = -spacing; y < size.height + spacing; y += spacing) {
       final offsetX = row.isOdd ? spacing / 2 : 0.0;
@@ -171,7 +176,7 @@ class _DoodlePainter extends CustomPainter {
               fontSize: glyphSize,
               fontFamily: icon.fontFamily,
               package: icon.fontPackage,
-              color: Colors.white.withOpacity(0.045),
+              color: color.withOpacity(0.05),
             ),
           ),
           textDirection: TextDirection.ltr,
@@ -184,7 +189,64 @@ class _DoodlePainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant _DoodlePainter oldDelegate) => false;
+  bool shouldRepaint(covariant _DoodlePainter oldDelegate) =>
+      oldDelegate.color != color || oldDelegate.spacing != spacing;
+}
+
+/// Wraps a page's content with the group's chosen app background (the
+/// doodle pattern in one of a few tints, or a custom photo). Pass
+/// [group] wherever it's available so the page respects that group's
+/// choice; pages with no group context (Home, auth/onboarding) just get
+/// the neutral default pattern.
+class AppBackground extends StatelessWidget {
+  final dynamic group;
+  final Widget child;
+
+  const AppBackground({super.key, this.group, required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = group?['background_theme'] as String? ?? 'default';
+    final photoPath = group?['theme_photo_url'] as String?;
+
+    if (theme == 'photo' && photoPath != null) {
+      return Stack(
+        children: [
+          Positioned.fill(
+            child: FutureBuilder<String>(
+              future: Supabase.instance.client.storage
+                  .from('Photos')
+                  .createSignedUrl(photoPath, 60 * 60),
+              builder: (context, snapshot) {
+                if (!snapshot.hasData) return Container(color: kBgColor);
+                return Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    CachedNetworkImage(imageUrl: snapshot.data!, fit: BoxFit.cover),
+                    Container(color: kBgColor.withOpacity(0.78)),
+                  ],
+                );
+              },
+            ),
+          ),
+          child,
+        ],
+      );
+    }
+
+    final color = switch (theme) {
+      'warm' => kAccentGold,
+      'cool' => kAccentTeal,
+      _ => Colors.white,
+    };
+
+    return Stack(
+      children: [
+        Positioned.fill(child: DoodleBackground(color: color)),
+        child,
+      ],
+    );
+  }
 }
 
 final analytics = FirebaseAnalytics.instance;
@@ -1210,22 +1272,51 @@ void navigateToGroupTab(BuildContext context, dynamic group, int index, [int cur
 }
 
 Widget buildGroupBottomNav(BuildContext context, dynamic group, int currentIndex) {
-  return BottomNavigationBar(
-    currentIndex: currentIndex,
-    onTap: (index) {
-      if (index == currentIndex) return;
-      navigateToGroupTab(context, group, index, currentIndex);
+  return FutureBuilder<int>(
+    future: fetchGroupUnreadCount(group['id']),
+    builder: (context, snapshot) {
+      final hasUnread = (snapshot.data ?? 0) > 0;
+      return BottomNavigationBar(
+        currentIndex: currentIndex,
+        onTap: (index) {
+          if (index == currentIndex) return;
+          navigateToGroupTab(context, group, index, currentIndex);
+        },
+        type: BottomNavigationBarType.fixed,
+        backgroundColor: kBgColor,
+        selectedItemColor: const Color(0xFFE10600),
+        unselectedItemColor: Colors.white54,
+        items: [
+          const BottomNavigationBarItem(icon: FaIcon(FontAwesomeIcons.house), label: 'Home'),
+          const BottomNavigationBarItem(
+              icon: FaIcon(FontAwesomeIcons.calendarDays), label: 'Calendar'),
+          BottomNavigationBarItem(
+            icon: Stack(
+              clipBehavior: Clip.none,
+              children: [
+                const FaIcon(FontAwesomeIcons.commentDots),
+                if (hasUnread)
+                  Positioned(
+                    right: -2,
+                    top: -2,
+                    child: Container(
+                      width: 9,
+                      height: 9,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFE10600),
+                        shape: BoxShape.circle,
+                        border: Border.all(color: kBgColor, width: 1.5),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            label: 'Chat',
+          ),
+          const BottomNavigationBarItem(icon: FaIcon(FontAwesomeIcons.trophy), label: 'Leaderboard'),
+        ],
+      );
     },
-    type: BottomNavigationBarType.fixed,
-    backgroundColor: kBgColor,
-    selectedItemColor: const Color(0xFFE10600),
-    unselectedItemColor: Colors.white54,
-    items: const [
-      BottomNavigationBarItem(icon: FaIcon(FontAwesomeIcons.house), label: 'Home'),
-      BottomNavigationBarItem(icon: FaIcon(FontAwesomeIcons.calendarDays), label: 'Calendar'),
-      BottomNavigationBarItem(icon: FaIcon(FontAwesomeIcons.commentDots), label: 'Chat'),
-      BottomNavigationBarItem(icon: FaIcon(FontAwesomeIcons.trophy), label: 'Leaderboard'),
-    ],
   );
 }
 
@@ -1489,41 +1580,38 @@ class _HomePageState extends State<HomePage> {
           ),
         ],
       ),
-  body: Stack(
-        children: [
-          const Positioned.fill(child: DoodleBackground()),
-          RefreshIndicator(
-            onRefresh: () async => setState(() {}),
-            child: FutureBuilder<List<dynamic>>(
-              future: fetchGroups(),
-              builder: (context, snapshot) {
-                final groups = snapshot.data ?? [];
-                final isLoading =
-                    snapshot.connectionState == ConnectionState.waiting;
+  body: AppBackground(
+        child: RefreshIndicator(
+          onRefresh: () async => setState(() {}),
+          child: FutureBuilder<List<dynamic>>(
+            future: fetchGroups(),
+            builder: (context, snapshot) {
+              final groups = snapshot.data ?? [];
+              final isLoading =
+                  snapshot.connectionState == ConnectionState.waiting;
 
-                return ListView(
-                  padding: EdgeInsets.fromLTRB(
-                      20, 20, 20, MediaQuery.of(context).padding.bottom + 90),
-                  children: [
-                    if (isLoading)
-                      const Center(child: CircularProgressIndicator())
-                    else if (snapshot.hasError)
-                      Center(child: Text('Error: ${snapshot.error}'))
-                    else if (groups.isEmpty)
-                      const _EmptyState(
-                        icon: FontAwesomeIcons.usersSlash,
-                        title: 'No groups yet',
-                        subtitle:
-                            'Create your first group or join one with an invite code.',
-                      )
-                    else
-                      ...groups.map((group) => _buildGroupCard(group)),
-                  ],
-                );
-              },
-            ),
+              return ListView(
+                padding: EdgeInsets.fromLTRB(
+                    20, 20, 20, MediaQuery.of(context).padding.bottom + 90),
+                children: [
+                  if (isLoading)
+                    const Center(child: CircularProgressIndicator())
+                  else if (snapshot.hasError)
+                    Center(child: Text('Error: ${snapshot.error}'))
+                  else if (groups.isEmpty)
+                    const _EmptyState(
+                      icon: FontAwesomeIcons.usersSlash,
+                      title: 'No groups yet',
+                      subtitle:
+                          'Create your first group or join one with an invite code.',
+                    )
+                  else
+                    ...groups.map((group) => _buildGroupCard(group)),
+                ],
+              );
+            },
           ),
-        ],
+        ),
       ),
       floatingActionButton: FloatingActionButton(
         onPressed: () => _showCreateJoinSheet(context),
@@ -1656,7 +1744,8 @@ class _CreateGroupPageState extends State<CreateGroupPage> {
       appBar: AppBar(
         title: const Text('Create Group'),
       ),
-      body: Padding(
+      body: AppBackground(
+        child: Padding(
         padding: const EdgeInsets.all(24),
         child: Column(
           children: [
@@ -1684,6 +1773,7 @@ class _CreateGroupPageState extends State<CreateGroupPage> {
                 ),
               ),
           ],
+        ),
         ),
       ),
     );
@@ -1768,6 +1858,12 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
       final scores = submissionIds.isEmpty
           ? <dynamic>[]
           : await supabase.from('scores').select().inFilter('submission_id', submissionIds);
+      final predictions = await supabase.from('predictions').select().eq('group_id', groupId);
+
+      final predictionsByDay = <String, List<dynamic>>{};
+      for (final p in predictions) {
+        predictionsByDay.putIfAbsent(p['day'] as String, () => []).add(p);
+      }
 
       final byDay = <String, List<dynamic>>{};
       final datesByUser = <String, Set<DateTime>>{};
@@ -1807,19 +1903,51 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
       for (var day = startDay; !day.isAfter(yesterday); day = day.add(const Duration(days: 1))) {
         final dayKey = _dateKeyForStreak(day);
         final daySubs = byDay[dayKey] ?? [];
-        if (daySubs.isEmpty) continue;
+        final dayPredictions = predictionsByDay[dayKey] ?? [];
+        String? winnerId;
 
-        final outcome = computeDayOutcome(daySubs, scores);
+        if (daySubs.isNotEmpty) {
+          final outcome = computeDayOutcome(daySubs, scores);
+          winnerId = outcome.winnerId;
 
-        if (outcome.winnerId != null) {
-          await award(outcome.winnerId!, 10, 'daily_win', dayKey);
-          if (streakEndingOn(outcome.winnerId!, day) >= 3) {
-            await award(outcome.winnerId!, 5, 'streak_bonus', dayKey);
+          if (outcome.winnerId != null) {
+            await award(outcome.winnerId!, 10, 'daily_win', dayKey);
+            if (streakEndingOn(outcome.winnerId!, day) >= 3) {
+              await award(outcome.winnerId!, 5, 'streak_bonus', dayKey);
+            }
+          }
+
+          for (final judgeId in outcome.judgeIds) {
+            await award(judgeId, 5, 'judging', dayKey);
           }
         }
 
-        for (final judgeId in outcome.judgeIds) {
-          await award(judgeId, 5, 'judging', dayKey);
+        if (dayPredictions.isEmpty) continue;
+
+        // Predictions pay out from a shared pot: correct predictors split the
+        // incorrect predictors' stakes (plus get their own stake back). If
+        // nobody guessed right (or there was no winner to guess at all), it's
+        // a wash — everyone just gets their stake refunded, no house edge.
+        final correct = winnerId == null
+            ? <dynamic>[]
+            : dayPredictions.where((p) => p['predicted_user_id'] == winnerId).toList();
+
+        if (correct.isEmpty) {
+          for (final p in dayPredictions) {
+            await award(p['predictor_id'] as String, p['stake'] as int, 'prediction_refund', dayKey);
+          }
+        } else {
+          final totalStake = dayPredictions.fold<int>(0, (sum, p) => sum + (p['stake'] as int));
+          final correctStake = correct.fold<int>(0, (sum, p) => sum + (p['stake'] as int));
+          final bonusEach = (totalStake - correctStake) ~/ correct.length;
+          for (final p in correct) {
+            await award(
+              p['predictor_id'] as String,
+              (p['stake'] as int) + bonusEach,
+              'prediction_payout',
+              dayKey,
+            );
+          }
         }
       }
 
@@ -2371,6 +2499,30 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
         'custom_title': member['custom_title'],
       };
     }).toList();
+  }
+
+  Widget _dashboardActionTile({
+    required FaIconData icon,
+    required Color color,
+    required String label,
+    required VoidCallback onTap,
+  }) {
+    return Card(
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 16),
+          child: Column(
+            children: [
+              FaIcon(icon, color: color, size: 24),
+              const SizedBox(height: 8),
+              Text(label, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   Widget _buildStatusChip(Map<String, dynamic> player) {
@@ -3049,6 +3201,7 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
     required String label,
     required bool selected,
     required VoidCallback onTap,
+    bool showBadge = false,
   }) {
     final color = selected ? const Color(0xFFE10600) : Colors.white54;
     return InkWell(
@@ -3056,7 +3209,26 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          FaIcon(icon, color: color, size: 24),
+          Stack(
+            clipBehavior: Clip.none,
+            children: [
+              FaIcon(icon, color: color, size: 24),
+              if (showBadge)
+                Positioned(
+                  right: -2,
+                  top: -2,
+                  child: Container(
+                    width: 9,
+                    height: 9,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFE10600),
+                      shape: BoxShape.circle,
+                      border: Border.all(color: kBgColor, width: 1.5),
+                    ),
+                  ),
+                ),
+            ],
+          ),
           const SizedBox(height: 3),
           Text(label, style: TextStyle(color: color, fontSize: selected ? 14 : 12)),
         ],
@@ -3174,11 +3346,17 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
                           );
                         },
                 ),
-          _navBarIcon(
-            icon: FontAwesomeIcons.commentDots,
-            label: 'Chat',
-            selected: false,
-            onTap: () => navigateToGroupTab(context, widget.group, 2),
+          FutureBuilder<int>(
+            future: fetchGroupUnreadCount(widget.group['id']),
+            builder: (context, snapshot) {
+              return _navBarIcon(
+                icon: FontAwesomeIcons.commentDots,
+                label: 'Chat',
+                selected: false,
+                showBadge: (snapshot.data ?? 0) > 0,
+                onTap: () => navigateToGroupTab(context, widget.group, 2),
+              );
+            },
           ),
           _navBarIcon(
             icon: FontAwesomeIcons.trophy,
@@ -3254,13 +3432,6 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
                     builder: (_) => WeeklyRecapPage(group: widget.group),
                   ),
                 );
-              } else if (value == 'store') {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => StorePage(group: widget.group),
-                  ),
-                ).then((_) => setState(() {}));
               } else if (value == 'profile') {
                 Navigator.push(
                   context,
@@ -3298,10 +3469,6 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
                 value: 'weekly_recap',
                 child: Text('Weekly Recap'),
               ),
-              const PopupMenuItem(
-                value: 'store',
-                child: Text('🪙 Store'),
-              ),
              if (isOwner) ...[
                 const PopupMenuItem(
                   value: 'manage_members',
@@ -3324,10 +3491,9 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
           ),
         ],
       ),
-body: Stack(
-        children: [
-          const Positioned.fill(child: DoodleBackground()),
-          RefreshIndicator(
+body: AppBackground(
+        group: widget.group,
+        child: RefreshIndicator(
         onRefresh: () async => setState(() {}),
         child: SingleChildScrollView(
           physics: const AlwaysScrollableScrollPhysics(),
@@ -3574,6 +3740,42 @@ body: Stack(
                 },
               ),
               const SizedBox(height: 16),
+              Row(
+                children: [
+                  Expanded(
+                    child: _dashboardActionTile(
+                      icon: FontAwesomeIcons.coins,
+                      color: kAccentGold,
+                      label: 'Store',
+                      onTap: () {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => StorePage(group: widget.group),
+                          ),
+                        ).then((_) => setState(() {}));
+                      },
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: _dashboardActionTile(
+                      icon: FontAwesomeIcons.gamepad,
+                      color: kAccentTeal,
+                      label: 'Mini-Games',
+                      onTap: () {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => MiniGamesPage(group: widget.group),
+                          ),
+                        ).then((_) => setState(() {}));
+                      },
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
               FutureBuilder<List<dynamic>>(
                 future: fetchMembersWithNames(),
                 builder: (context, snapshot) {
@@ -3642,24 +3844,23 @@ body: Stack(
                                               username: m['username'] ?? '?',
                                               color: color,
                                             ),
-                                            if (m['role'] != 'player')
-                                              Positioned(
-                                                left: -4,
-                                                top: -4,
-                                                child: Container(
-                                                  padding: const EdgeInsets.all(3),
-                                                  decoration: const BoxDecoration(
-                                                    color: kBgColor,
-                                                    shape: BoxShape.circle,
-                                                  ),
-                                                  child: roleIcon(
-                                                    m['role'],
-                                                    size: 9,
-                                                    color: Colors.white70,
-                                                    compact: true,
-                                                  ),
+                                            Positioned(
+                                              left: -4,
+                                              top: -4,
+                                              child: Container(
+                                                padding: const EdgeInsets.all(3),
+                                                decoration: const BoxDecoration(
+                                                  color: kBgColor,
+                                                  shape: BoxShape.circle,
+                                                ),
+                                                child: roleIcon(
+                                                  m['role'],
+                                                  size: 9,
+                                                  color: Colors.white70,
+                                                  compact: true,
                                                 ),
                                               ),
+                                            ),
                                             if (streak > 0)
                                               Positioned(
                                                 right: -4,
@@ -3727,7 +3928,6 @@ body: Stack(
         ),
       ),
       ),
-        ],
       ),
       bottomNavigationBar: _homeBottomBar(canUpload, isHybridJudge),
     );
@@ -4190,7 +4390,8 @@ class _JoinGroupPageState extends State<JoinGroupPage> {
       appBar: AppBar(
         title: const Text('Join Group'),
       ),
-      body: Padding(
+      body: AppBackground(
+        child: Padding(
         padding: const EdgeInsets.all(24),
         child: Column(
           children: [
@@ -4217,6 +4418,7 @@ class _JoinGroupPageState extends State<JoinGroupPage> {
                 ),
               ),
           ],
+        ),
         ),
       ),
     );
@@ -4403,7 +4605,9 @@ Future<void> saveScore(String submissionId, int score) async {
       appBar: AppBar(
         title: const Text('Judge Photos'),
       ),
-      body: Column(
+      body: AppBackground(
+        group: widget.group,
+        child: Column(
         children: [
           if (challengeText != null)
             Container(
@@ -4710,6 +4914,7 @@ if (myScore == 0)
           ),
         ],
       ),
+      ),
     );
   }
 }
@@ -4808,7 +5013,9 @@ class TodayPhotosPage extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Today\'s Photos')),
-      body: FutureBuilder<List<Map<String, dynamic>>>(
+      body: AppBackground(
+        group: group,
+        child: FutureBuilder<List<Map<String, dynamic>>>(
         future: fetchTodayPhotos(),
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) {
@@ -4844,6 +5051,7 @@ class TodayPhotosPage extends StatelessWidget {
             ),
           );
         },
+      ),
       ),
     );
   }
@@ -4953,7 +5161,9 @@ final submissions = await supabase
       appBar: AppBar(
         title: const Text('Leaderboard'),
       ),
-      body: FutureBuilder<List<Map<String, dynamic>>>(
+      body: AppBackground(
+        group: group,
+        child: FutureBuilder<List<Map<String, dynamic>>>(
         future: fetchLeaderboard(),
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) {
@@ -5059,6 +5269,7 @@ return ListView(
 );
         },
       ),
+      ),
       bottomNavigationBar: buildGroupBottomNav(context, group, 3),
     );
   }
@@ -5153,7 +5364,9 @@ class WeeklyRecapPage extends StatelessWidget {
 
     return Scaffold(
       appBar: AppBar(title: const Text('Weekly Recap')),
-      body: FutureBuilder<Map<String, dynamic>>(
+      body: AppBackground(
+        group: group,
+        child: FutureBuilder<Map<String, dynamic>>(
         future: fetchWeeklyRecap(),
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) {
@@ -5220,6 +5433,7 @@ class WeeklyRecapPage extends StatelessWidget {
             ],
           );
         },
+      ),
       ),
     );
   }
@@ -5317,7 +5531,9 @@ result.add({
       appBar: AppBar(
         title: const Text('Battle Details'),
       ),
-body: SingleChildScrollView(
+body: AppBackground(
+  group: group,
+  child: SingleChildScrollView(
   padding: EdgeInsets.fromLTRB(20, 20, 20, MediaQuery.of(context).padding.bottom + 20),
   child: FutureBuilder<List<Map<String, dynamic>>>(
     future: fetchBattlePhotos(),
@@ -5520,6 +5736,7 @@ body: SingleChildScrollView(
         ],
       );
     },
+  ),
   ),
 ),
     );
@@ -6250,7 +6467,9 @@ Widget _dayCell(
           ),
         ],
       ),
-     body: _loading
+     body: AppBackground(
+        group: widget.group,
+        child: _loading
           ? const Center(child: CircularProgressIndicator())
           : _errorMessage != null
               ? Center(child: Text('Error: $_errorMessage'))
@@ -6340,6 +6559,7 @@ Widget _dayCell(
                     ],
                   ),
                 ),
+      ),
       bottomNavigationBar: buildGroupBottomNav(context, widget.group, 1),
     );
   }
@@ -6687,8 +6907,38 @@ class _StorePageState extends State<StorePage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Store')),
-      body: _loading
+      appBar: AppBar(
+        title: const Text('Store'),
+        actions: [
+          IconButton(
+            icon: const FaIcon(FontAwesomeIcons.circleQuestion),
+            tooltip: 'How to earn coins',
+            onPressed: () {
+              showDialog(
+                context: context,
+                builder: (context) => AlertDialog(
+                  title: const Text('🪙 How to Earn Coins'),
+                  content: const Text(
+                    '🏆 Win the day — 10 coins\n\n'
+                    '🔥 Win with a streak of 3+ — an extra 5 coins\n\n'
+                    '⚖️ Judge a day — 5 coins, whether or not you win\n\n'
+                    'Coins are paid out automatically once a day is finished.',
+                  ),
+                  actions: [
+                    ElevatedButton(
+                      onPressed: () => Navigator.pop(context),
+                      child: const Text('Got it'),
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
+        ],
+      ),
+      body: AppBackground(
+        group: widget.group,
+        child: _loading
           ? const Center(child: CircularProgressIndicator())
           : RefreshIndicator(
               onRefresh: _load,
@@ -6780,8 +7030,850 @@ class _StorePageState extends State<StorePage> {
                 ],
               ),
             ),
+      ),
     );
   }
+}
+
+class MiniGamesPage extends StatelessWidget {
+  final dynamic group;
+
+  const MiniGamesPage({super.key, required this.group});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Mini-Games')),
+      body: AppBackground(
+        group: group,
+        child: ListView(
+          padding: EdgeInsets.fromLTRB(16, 16, 16, MediaQuery.of(context).padding.bottom + 16),
+          children: [
+            Card(
+              child: ListTile(
+                contentPadding: const EdgeInsets.all(16),
+                leading: const FaIcon(FontAwesomeIcons.bullseye, size: 28, color: kAccentGold),
+                title: const Text('Predictions', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                subtitle: const Text('Bet coins on who wins today\'s battle.'),
+                trailing: const FaIcon(FontAwesomeIcons.chevronRight, size: 14),
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => PredictionsPage(group: group)),
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Card(
+              child: ListTile(
+                contentPadding: const EdgeInsets.all(16),
+                leading: const FaIcon(FontAwesomeIcons.masksTheater, size: 28, color: kAccentTeal),
+                title: const Text('Real or Fake', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                subtitle: const Text('Submit a sneaky photo, or catch someone else\'s bluff.'),
+                trailing: const FaIcon(FontAwesomeIcons.chevronRight, size: 14),
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => BluffGamePage(group: group)),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+const int kPredictionStake = 5;
+
+class PredictionsPage extends StatefulWidget {
+  final dynamic group;
+
+  const PredictionsPage({super.key, required this.group});
+
+  @override
+  State<PredictionsPage> createState() => _PredictionsPageState();
+}
+
+class _PredictionsPageState extends State<PredictionsPage> {
+  final supabase = Supabase.instance.client;
+
+  bool _loading = true;
+  bool _placing = false;
+  int _balance = 0;
+  List<Map<String, dynamic>> _competingMembers = [];
+  Map<String, Map<String, dynamic>> _usersById = {};
+  Map<String, dynamic>? _todayPrediction;
+  List<Map<String, dynamic>> _history = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() => _loading = true);
+    final user = supabase.auth.currentUser;
+    if (user == null) return;
+
+    final groupId = widget.group['id'];
+    final todayKey = _dateKeyForStreak(DateTime.now());
+
+    final results = await Future.wait<dynamic>([
+      fetchCoinBalance(groupId, user.id),
+      supabase
+          .from('group_members')
+          .select()
+          .eq('group_id', groupId)
+          .inFilter('role', ['owner', 'player', 'judge']),
+      supabase.from('users').select(),
+      supabase
+          .from('predictions')
+          .select()
+          .eq('group_id', groupId)
+          .eq('predictor_id', user.id)
+          .order('day', ascending: false)
+          .limit(14),
+      supabase
+          .from('coin_transactions')
+          .select()
+          .eq('group_id', groupId)
+          .eq('user_id', user.id)
+          .inFilter('reason', ['prediction_payout', 'prediction_refund']),
+      supabase.from('groups').select('coins_settled_through').eq('id', groupId).single(),
+    ]);
+
+    if (!mounted) return;
+
+    final members = (results[1] as List).cast<Map<String, dynamic>>();
+    final competing = members
+        .where((m) =>
+            m['role'] == 'player' ||
+            (m['role'] == 'owner' && (m['owner_is_judge'] != true || m['judge_also_plays'] == true)) ||
+            (m['role'] == 'judge' && m['judge_also_plays'] == true))
+        .toList();
+
+    final users = (results[2] as List).cast<Map<String, dynamic>>();
+    final usersById = {for (final u in users) u['id'] as String: u};
+
+    final myPredictions = (results[3] as List).cast<Map<String, dynamic>>();
+    final settlementTxs = (results[4] as List).cast<Map<String, dynamic>>();
+    final settledThrough = (results[5] as Map<String, dynamic>)['coins_settled_through'] as String?;
+
+    Map<String, dynamic>? today;
+    final history = <Map<String, dynamic>>[];
+    for (final p in myPredictions) {
+      final day = p['day'] as String;
+      if (day == todayKey) {
+        today = p;
+        continue;
+      }
+
+      String status;
+      if (settledThrough == null || settledThrough.compareTo(day) < 0) {
+        status = 'pending';
+      } else {
+        final payout = settlementTxs.where((t) => t['reference_date'] == day && t['reason'] == 'prediction_payout');
+        final refund = settlementTxs.where((t) => t['reference_date'] == day && t['reason'] == 'prediction_refund');
+        if (payout.isNotEmpty) {
+          status = 'won:${payout.first['amount']}';
+        } else if (refund.isNotEmpty) {
+          status = 'refunded';
+        } else {
+          status = 'lost';
+        }
+      }
+      history.add({...p, 'status': status});
+    }
+
+    setState(() {
+      _balance = results[0] as int;
+      _competingMembers = competing;
+      _usersById = usersById;
+      _todayPrediction = today;
+      _history = history;
+      _loading = false;
+    });
+  }
+
+  Future<void> _confirmAndPlace(String targetUserId, String targetUsername) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Place Prediction'),
+        content: Text('Bet $kPredictionStake 🪙 that $targetUsername wins today\'s battle?'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('Cancel')),
+          ElevatedButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('Bet')),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    await _placePrediction(targetUserId);
+  }
+
+  Future<void> _placePrediction(String targetUserId) async {
+    final user = supabase.auth.currentUser;
+    if (user == null || _placing) return;
+
+    setState(() => _placing = true);
+    try {
+      final freshBalance = await fetchCoinBalance(widget.group['id'], user.id);
+      if (freshBalance < kPredictionStake) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Not enough coins')),
+        );
+        return;
+      }
+
+      await supabase.from('predictions').insert({
+        'group_id': widget.group['id'],
+        'day': _dateKeyForStreak(DateTime.now()),
+        'predictor_id': user.id,
+        'predicted_user_id': targetUserId,
+        'stake': kPredictionStake,
+      });
+
+      await supabase.from('coin_transactions').insert({
+        'group_id': widget.group['id'],
+        'user_id': user.id,
+        'amount': -kPredictionStake,
+        'reason': 'stake:prediction',
+      });
+
+      analytics.logEvent(name: 'prediction_placed');
+      HapticFeedback.mediumImpact();
+      playFeedbackSound();
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Prediction locked in!')),
+      );
+      await _load();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(friendlyError(e))),
+      );
+    } finally {
+      if (mounted) setState(() => _placing = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Predictions')),
+      body: AppBackground(
+        group: widget.group,
+        child: _loading
+            ? const Center(child: CircularProgressIndicator())
+            : RefreshIndicator(
+                onRefresh: _load,
+                child: ListView(
+                  padding: EdgeInsets.fromLTRB(16, 16, 16, MediaQuery.of(context).padding.bottom + 16),
+                  children: [
+                    Card(
+                      color: kAccentGold.withOpacity(0.12),
+                      child: Padding(
+                        padding: const EdgeInsets.all(20),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            const FaIcon(FontAwesomeIcons.coins, color: kAccentGold, size: 28),
+                            const SizedBox(width: 10),
+                            _AnimatedCount(
+                              value: _balance,
+                              suffix: ' coins',
+                              style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    const Text('Who wins today?', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Bet $kPredictionStake 🪙 on today\'s winner. Guess right and split the losers\' stakes.',
+                      style: const TextStyle(fontSize: 13, color: Colors.white70),
+                    ),
+                    const SizedBox(height: 12),
+                    if (_todayPrediction != null)
+                      Card(
+                        child: ListTile(
+                          leading: const FaIcon(FontAwesomeIcons.circleCheck, color: kAccentGold),
+                          title: Text(
+                            'You picked ${_usersById[_todayPrediction!['predicted_user_id']]?['username'] ?? 'Unknown'}',
+                          ),
+                          subtitle: const Text('Locked in for today — check back after judging.'),
+                        ),
+                      )
+                    else if (_competingMembers.isEmpty)
+                      const _EmptyState(
+                        icon: FontAwesomeIcons.bullseye,
+                        title: 'No one to bet on yet',
+                        subtitle: 'Predictions open once your group has competing players.',
+                      )
+                    else
+                      ..._competingMembers.map((m) {
+                        final u = _usersById[m['user_id']];
+                        final username = u?['username'] as String? ?? 'Unknown';
+                        return Card(
+                          child: ListTile(
+                            leading: _MemberAvatar(username: username, color: kAccentGold, size: 36),
+                            title: Text(username),
+                            trailing: ElevatedButton(
+                              onPressed: _placing ? null : () => _confirmAndPlace(m['user_id'] as String, username),
+                              child: Text('Bet $kPredictionStake🪙'),
+                            ),
+                          ),
+                        );
+                      }),
+                    if (_history.isNotEmpty) ...[
+                      const SizedBox(height: 24),
+                      const Text('Recent Results', style: TextStyle(fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 8),
+                      ..._history.map((p) {
+                        final username = _usersById[p['predicted_user_id']]?['username'] as String? ?? 'Unknown';
+                        final status = p['status'] as String;
+                        String label;
+                        Color color;
+                        if (status == 'pending') {
+                          label = 'Pending';
+                          color = Colors.white54;
+                        } else if (status.startsWith('won:')) {
+                          label = '+${status.split(':')[1]} 🪙';
+                          color = kAccentGold;
+                        } else if (status == 'refunded') {
+                          label = 'Refunded';
+                          color = Colors.white54;
+                        } else {
+                          label = 'Lost';
+                          color = Colors.redAccent;
+                        }
+                        return ListTile(
+                          dense: true,
+                          title: Text('${p['day']} — picked $username'),
+                          trailing: Text(label, style: TextStyle(color: color, fontWeight: FontWeight.bold)),
+                        );
+                      }),
+                    ],
+                  ],
+                ),
+              ),
+      ),
+    );
+  }
+}
+
+const int kBluffSubmitStake = 5;
+const int kBluffGuessStake = 3;
+
+/// Lazily resolves any 'Real or Fake' rounds whose guessing window has
+/// closed — same pattern as [_settleCoinPayouts]: safe to call every time
+/// the mini-game page loads, idempotent via the ledger's [reference_id]
+/// partial unique index, so double-resolution from two devices is a no-op.
+/// Payouts: correct guessers split the wrong guessers' stakes (plus get
+/// their own stake back); if nobody caught the bluff, the submitter takes
+/// the whole guess pot as a "fooled everyone" bonus; if nobody guessed at
+/// all, the submitter just gets their entry stake refunded.
+Future<void> resolveBluffRounds(String groupId) async {
+  final supabase = Supabase.instance.client;
+  try {
+    final dueRounds = await supabase
+        .from('bluff_rounds')
+        .select()
+        .eq('group_id', groupId)
+        .eq('status', 'open')
+        .lte('resolves_at', DateTime.now().toUtc().toIso8601String());
+
+    for (final round in dueRounds) {
+      final roundId = round['id'] as String;
+      final guesses = await supabase.from('bluff_guesses').select().eq('round_id', roundId);
+
+      final isReal = round['is_real'] as bool;
+      final correct = guesses.where((g) => g['guess'] == isReal).toList();
+      final wrong = guesses.where((g) => g['guess'] != isReal).toList();
+      final wrongPot = wrong.length * kBluffGuessStake;
+
+      Future<void> award(String userId, int amount, String reason) {
+        return supabase.from('coin_transactions').upsert(
+          {
+            'group_id': groupId,
+            'user_id': userId,
+            'amount': amount,
+            'reason': reason,
+            'reference_id': roundId,
+          },
+          onConflict: 'group_id,user_id,reason,reference_id',
+          ignoreDuplicates: true,
+        );
+      }
+
+      if (correct.isNotEmpty) {
+        final bonusEach = wrongPot ~/ correct.length;
+        for (final g in correct) {
+          await award(g['guesser_id'] as String, kBluffGuessStake + bonusEach, 'bluff_guess_correct');
+        }
+        await award(round['submitter_id'] as String, kBluffSubmitStake, 'bluff_submit_refund');
+      } else if (wrong.isNotEmpty) {
+        await award(round['submitter_id'] as String, kBluffSubmitStake + wrongPot, 'bluff_submit_bonus');
+      } else {
+        await award(round['submitter_id'] as String, kBluffSubmitStake, 'bluff_submit_refund');
+      }
+
+      await supabase
+          .from('bluff_rounds')
+          .update({'status': 'resolved'})
+          .eq('id', roundId)
+          .eq('status', 'open');
+    }
+  } catch (e, st) {
+    FirebaseCrashlytics.instance.recordError(e, st, fatal: false);
+  }
+}
+
+class BluffGamePage extends StatefulWidget {
+  final dynamic group;
+
+  const BluffGamePage({super.key, required this.group});
+
+  @override
+  State<BluffGamePage> createState() => _BluffGamePageState();
+}
+
+class _BluffGamePageState extends State<BluffGamePage> {
+  final supabase = Supabase.instance.client;
+
+  bool _loading = true;
+  bool _busy = false;
+  int _balance = 0;
+  Map<String, Map<String, dynamic>> _usersById = {};
+  List<Map<String, dynamic>> _toGuess = [];
+  List<Map<String, dynamic>> _myOpen = [];
+  List<Map<String, dynamic>> _resolved = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() => _loading = true);
+    final user = supabase.auth.currentUser;
+    if (user == null) return;
+
+    final groupId = widget.group['id'];
+
+    await resolveBluffRounds(groupId);
+
+    final results = await Future.wait<dynamic>([
+      fetchCoinBalance(groupId, user.id),
+      supabase.from('bluff_rounds').select().eq('group_id', groupId).order('created_at', ascending: false),
+      supabase.from('users').select(),
+    ]);
+
+    if (!mounted) return;
+
+    final rounds = (results[1] as List).cast<Map<String, dynamic>>();
+    final users = (results[2] as List).cast<Map<String, dynamic>>();
+    final usersById = {for (final u in users) u['id'] as String: u};
+
+    final roundIds = rounds.map((r) => r['id']).toList();
+    final allGuesses = roundIds.isEmpty
+        ? <dynamic>[]
+        : await supabase.from('bluff_guesses').select().inFilter('round_id', roundIds);
+
+    final guessesByRound = <String, List<dynamic>>{};
+    for (final g in allGuesses) {
+      guessesByRound.putIfAbsent(g['round_id'] as String, () => []).add(g);
+    }
+
+    final signedUrls = <String, String>{};
+    await Future.wait(rounds.map((r) async {
+      signedUrls[r['id'] as String] =
+          await supabase.storage.from('Photos').createSignedUrl(r['photo_url'], 60 * 60);
+    }));
+
+    final toGuess = <Map<String, dynamic>>[];
+    final mine = <Map<String, dynamic>>[];
+    final resolved = <Map<String, dynamic>>[];
+
+    for (final r in rounds) {
+      final rid = r['id'] as String;
+      final guesses = guessesByRound[rid] ?? [];
+      final myGuesses = guesses.where((g) => g['guesser_id'] == user.id).toList();
+      final enriched = {
+        ...r,
+        'guesses': guesses,
+        'my_guess': myGuesses.isEmpty ? null : myGuesses.first,
+        'signed_url': signedUrls[rid],
+      };
+
+      if (r['status'] == 'resolved') {
+        resolved.add(enriched);
+      } else if (r['submitter_id'] == user.id || myGuesses.isNotEmpty) {
+        mine.add(enriched);
+      } else {
+        toGuess.add(enriched);
+      }
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _balance = results[0] as int;
+      _usersById = usersById;
+      _toGuess = toGuess;
+      _myOpen = mine;
+      _resolved = resolved.take(10).toList();
+      _loading = false;
+    });
+  }
+
+  Future<void> _startRound() async {
+    final user = supabase.auth.currentUser;
+    if (user == null || _busy) return;
+
+    final picker = ImagePicker();
+    final image = await picker.pickImage(source: ImageSource.gallery, imageQuality: 85);
+    if (image == null) return;
+
+    if (!mounted) return;
+    final isReal = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Real or Fake?'),
+        content: const Text(
+          'Did you actually take this photo yourself, or is it fake (downloaded, someone else\'s, AI-made, etc.)?\n\nOther players will try to guess which — pick honestly, the fun is in fooling them.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('It\'s Fake'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('I Took It'),
+          ),
+        ],
+      ),
+    );
+    if (isReal == null || !mounted) return;
+
+    setState(() => _busy = true);
+    try {
+      final freshBalance = await fetchCoinBalance(widget.group['id'], user.id);
+      if (freshBalance < kBluffSubmitStake) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Not enough coins')),
+        );
+        return;
+      }
+
+      final path = 'bluff_photos/${widget.group['id']}/${DateTime.now().millisecondsSinceEpoch}.jpg';
+      await supabase.storage.from('Photos').upload(
+            path,
+            File(image.path),
+            fileOptions: const FileOptions(upsert: true),
+          );
+
+      await supabase.from('bluff_rounds').insert({
+        'group_id': widget.group['id'],
+        'submitter_id': user.id,
+        'photo_url': path,
+        'is_real': isReal,
+        'resolves_at': DateTime.now().toUtc().add(const Duration(hours: 24)).toIso8601String(),
+      });
+
+      await supabase.from('coin_transactions').insert({
+        'group_id': widget.group['id'],
+        'user_id': user.id,
+        'amount': -kBluffSubmitStake,
+        'reason': 'stake:bluff_submit',
+      });
+
+      analytics.logEvent(name: 'bluff_round_started');
+      HapticFeedback.mediumImpact();
+      playFeedbackSound();
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Round started! Open for 24 hours.')),
+      );
+      await _load();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(friendlyError(e))),
+      );
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _guess(String roundId, bool guessReal) async {
+    final user = supabase.auth.currentUser;
+    if (user == null || _busy) return;
+
+    setState(() => _busy = true);
+    try {
+      final freshBalance = await fetchCoinBalance(widget.group['id'], user.id);
+      if (freshBalance < kBluffGuessStake) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Not enough coins')),
+        );
+        return;
+      }
+
+      await supabase.from('bluff_guesses').insert({
+        'round_id': roundId,
+        'guesser_id': user.id,
+        'guess': guessReal,
+      });
+
+      await supabase.from('coin_transactions').insert({
+        'group_id': widget.group['id'],
+        'user_id': user.id,
+        'amount': -kBluffGuessStake,
+        'reason': 'stake:bluff_guess',
+      });
+
+      analytics.logEvent(name: 'bluff_guess_placed');
+      HapticFeedback.mediumImpact();
+      playFeedbackSound();
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Guess locked in!')),
+      );
+      await _load();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(friendlyError(e))),
+      );
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Widget _photoThumb(String? url) {
+    return GestureDetector(
+      onTap: url == null
+          ? null
+          : () => Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => FullScreenPhotoPage(imageUrl: url)),
+              ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(10),
+        child: url == null
+            ? Container(width: 64, height: 64, color: kSurfaceColor)
+            : CachedNetworkImage(
+                imageUrl: url,
+                width: 64,
+                height: 64,
+                fit: BoxFit.cover,
+              ),
+      ),
+    );
+  }
+
+  Widget _toGuessCard(Map<String, dynamic> r) {
+    final username = _usersById[r['submitter_id']]?['username'] as String? ?? 'Unknown';
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _photoThumb(r['signed_url'] as String?),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('$username\'s photo', style: const TextStyle(fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 4),
+                  const Text(
+                    'Real, or fake?',
+                    style: TextStyle(fontSize: 12, color: Colors.white70),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton(
+                          onPressed: _busy ? null : () => _guess(r['id'] as String, false),
+                          child: Text('Fake ($kBluffGuessStake🪙)'),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: ElevatedButton(
+                          onPressed: _busy ? null : () => _guess(r['id'] as String, true),
+                          child: Text('Real ($kBluffGuessStake🪙)'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _myOpenCard(Map<String, dynamic> r) {
+    final user = supabase.auth.currentUser;
+    final isMine = r['submitter_id'] == user?.id;
+    final myGuess = r['my_guess'] as Map<String, dynamic>?;
+    final username = _usersById[r['submitter_id']]?['username'] as String? ?? 'Unknown';
+    final resolvesAt = DateTime.parse(r['resolves_at'] as String).toLocal();
+
+    return Card(
+      child: ListTile(
+        leading: _photoThumb(r['signed_url'] as String?),
+        title: Text(isMine ? 'Your round' : '$username\'s photo'),
+        subtitle: Text(
+          isMine
+              ? 'Waiting for guesses — resolves ${_formatShortTime(resolvesAt)}'
+              : 'You guessed ${myGuess?['guess'] == true ? 'Real' : 'Fake'} — resolves ${_formatShortTime(resolvesAt)}',
+          style: const TextStyle(fontSize: 12),
+        ),
+        trailing: const FaIcon(FontAwesomeIcons.hourglassHalf, size: 16, color: Colors.white54),
+      ),
+    );
+  }
+
+  Widget _resolvedCard(Map<String, dynamic> r) {
+    final user = supabase.auth.currentUser;
+    final isMine = r['submitter_id'] == user?.id;
+    final username = _usersById[r['submitter_id']]?['username'] as String? ?? 'Unknown';
+    final isReal = r['is_real'] as bool;
+    final myGuess = r['my_guess'] as Map<String, dynamic>?;
+    final guesses = (r['guesses'] as List).cast<Map<String, dynamic>>();
+    final correctCount = guesses.where((g) => g['guess'] == isReal).length;
+
+    String resultLine;
+    if (isMine) {
+      resultLine = guesses.isEmpty
+          ? 'No one guessed — stake refunded'
+          : correctCount == 0
+              ? 'You fooled everyone! 🎭'
+              : '$correctCount/${guesses.length} caught it';
+    } else if (myGuess != null) {
+      final wasRight = myGuess['guess'] == isReal;
+      resultLine = wasRight ? 'You were right! ✅' : 'You were fooled ❌';
+    } else {
+      resultLine = 'You didn\'t guess on this one';
+    }
+
+    return Card(
+      color: kSurfaceColor,
+      child: ListTile(
+        leading: _photoThumb(r['signed_url'] as String?),
+        title: Text('$username\'s photo was ${isReal ? 'REAL' : 'FAKE'}'),
+        subtitle: Text(resultLine, style: const TextStyle(fontSize: 12)),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Real or Fake'),
+        actions: [
+          IconButton(
+            icon: const FaIcon(FontAwesomeIcons.plus),
+            tooltip: 'Start a round',
+            onPressed: _busy ? null : _startRound,
+          ),
+        ],
+      ),
+      body: AppBackground(
+        group: widget.group,
+        child: _loading
+            ? const Center(child: CircularProgressIndicator())
+            : RefreshIndicator(
+                onRefresh: _load,
+                child: ListView(
+                  padding: EdgeInsets.fromLTRB(16, 16, 16, MediaQuery.of(context).padding.bottom + 16),
+                  children: [
+                    Card(
+                      color: kAccentGold.withOpacity(0.12),
+                      child: Padding(
+                        padding: const EdgeInsets.all(20),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            const FaIcon(FontAwesomeIcons.coins, color: kAccentGold, size: 28),
+                            const SizedBox(width: 10),
+                            _AnimatedCount(
+                              value: _balance,
+                              suffix: ' coins',
+                              style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
+                        onPressed: _busy ? null : _startRound,
+                        icon: const FaIcon(FontAwesomeIcons.masksTheater),
+                        label: Text('Start a Round ($kBluffSubmitStake🪙)'),
+                      ),
+                    ),
+                    if (_toGuess.isNotEmpty) ...[
+                      const SizedBox(height: 20),
+                      const Text('Guess These', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 8),
+                      ..._toGuess.map(_toGuessCard),
+                    ],
+                    if (_myOpen.isNotEmpty) ...[
+                      const SizedBox(height: 20),
+                      const Text('Pending', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 8),
+                      ..._myOpen.map(_myOpenCard),
+                    ],
+                    if (_resolved.isNotEmpty) ...[
+                      const SizedBox(height: 20),
+                      const Text('Revealed', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 8),
+                      ..._resolved.map(_resolvedCard),
+                    ],
+                    if (_toGuess.isEmpty && _myOpen.isEmpty && _resolved.isEmpty) ...[
+                      const SizedBox(height: 40),
+                      const _EmptyState(
+                        icon: FontAwesomeIcons.masksTheater,
+                        title: 'No rounds yet',
+                        subtitle: 'Start one — submit a photo and see who you can fool.',
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+      ),
+    );
+  }
+}
+
+String _formatShortTime(DateTime t) {
+  final hour = t.hour % 12 == 0 ? 12 : t.hour % 12;
+  final minute = t.minute.toString().padLeft(2, '0');
+  final ampm = t.hour >= 12 ? 'PM' : 'AM';
+  return '$hour:$minute $ampm';
 }
 
 class SettingsPage extends StatefulWidget {
@@ -6973,6 +8065,9 @@ class _SettingsPageState extends State<SettingsPage> {
   String? _backgroundColor;
   String? _backgroundPhotoUrl;
   int _challengesPerWeek = 0;
+  String _backgroundTheme = 'default';
+  String? _themePhotoUrl;
+  bool _uploadingThemePhoto = false;
 
   @override
   void initState() {
@@ -7005,6 +8100,8 @@ class _SettingsPageState extends State<SettingsPage> {
         _backgroundColor = group['background_color'];
         _backgroundPhotoUrl = group['background_photo_url'];
         _challengesPerWeek = group['challenges_per_week'] ?? 0;
+        _backgroundTheme = group['background_theme'] ?? 'default';
+        _themePhotoUrl = group['theme_photo_url'];
         _loading = false;
       });
     } catch (e) {
@@ -7301,13 +8398,121 @@ try {
     }
   }
 
+  Future<void> _setBackgroundTheme(String theme) async {
+    final supabase = Supabase.instance.client;
+    final previous = _backgroundTheme;
+
+    setState(() {
+      _backgroundTheme = theme;
+      _saving = true;
+    });
+
+    try {
+      final result = await supabase
+          .from('groups')
+          .update({'background_theme': theme})
+          .eq('id', widget.group['id'])
+          .select();
+
+      if (!mounted) return;
+
+      if (result.isEmpty) {
+        setState(() => _backgroundTheme = previous);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Save blocked by database permissions (no rows updated)',
+            ),
+          ),
+        );
+        setState(() => _saving = false);
+        return;
+      }
+
+      widget.group['background_theme'] = theme;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Setting saved')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+
+      setState(() => _backgroundTheme = previous);
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(friendlyError(e))),
+      );
+    }
+
+    if (!mounted) return;
+    setState(() => _saving = false);
+  }
+
+  Future<void> _uploadThemePhoto() async {
+    final supabase = Supabase.instance.client;
+    final picker = ImagePicker();
+
+    final image = await picker.pickImage(source: ImageSource.gallery, imageQuality: 85);
+    if (image == null) return;
+
+    if (!mounted) return;
+    final croppedBytes = await Navigator.push<Uint8List>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => _PhotoCropPage(imageFile: File(image.path), aspectRatio: 9 / 16),
+      ),
+    );
+    if (croppedBytes == null) return;
+
+    setState(() => _uploadingThemePhoto = true);
+
+    try {
+      final path =
+          'group_theme_backgrounds/${widget.group['id']}/${DateTime.now().millisecondsSinceEpoch}.png';
+
+      await supabase.storage.from('Photos').uploadBinary(
+            path,
+            croppedBytes,
+            fileOptions: const FileOptions(upsert: true, contentType: 'image/png'),
+          );
+
+      await supabase.from('groups').update({
+        'background_theme': 'photo',
+        'theme_photo_url': path,
+      }).eq('id', widget.group['id']);
+
+      if (!mounted) return;
+
+      setState(() {
+        _backgroundTheme = 'photo';
+        _themePhotoUrl = path;
+      });
+      widget.group['background_theme'] = 'photo';
+      widget.group['theme_photo_url'] = path;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Background updated')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(friendlyError(e))),
+      );
+    }
+
+    if (!mounted) return;
+    setState(() => _uploadingThemePhoto = false);
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Group Settings'),
       ),
-      body: _loading
+      body: AppBackground(
+        group: widget.group,
+        child: _loading
           ? const Center(child: CircularProgressIndicator())
           : SingleChildScrollView(
               padding: EdgeInsets.fromLTRB(20, 20, 20, MediaQuery.of(context).padding.bottom + 20),
@@ -7399,6 +8604,66 @@ try {
                   ),
                   const SizedBox(height: 16),
                   Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text('App Background', style: TextStyle(fontWeight: FontWeight.bold)),
+                          const SizedBox(height: 4),
+                          const Text(
+                            'Sets the pattern behind every page for the whole group.',
+                            style: TextStyle(fontSize: 13, color: Colors.white70),
+                          ),
+                          const SizedBox(height: 12),
+                          Wrap(
+                            spacing: 8,
+                            children: [
+                              ChoiceChip(
+                                label: const Text('Default'),
+                                selected: _backgroundTheme == 'default',
+                                onSelected: _saving ? null : (_) => _setBackgroundTheme('default'),
+                              ),
+                              ChoiceChip(
+                                label: const Text('Warm'),
+                                selected: _backgroundTheme == 'warm',
+                                onSelected: _saving ? null : (_) => _setBackgroundTheme('warm'),
+                              ),
+                              ChoiceChip(
+                                label: const Text('Cool'),
+                                selected: _backgroundTheme == 'cool',
+                                onSelected: _saving ? null : (_) => _setBackgroundTheme('cool'),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 16),
+                          SizedBox(
+                            width: double.infinity,
+                            child: OutlinedButton.icon(
+                              onPressed: _uploadingThemePhoto ? null : _uploadThemePhoto,
+                              icon: const FaIcon(FontAwesomeIcons.images),
+                              label: Text(
+                                _uploadingThemePhoto
+                                    ? 'Uploading...'
+                                    : _backgroundTheme == 'photo'
+                                        ? 'Change Photo'
+                                        : 'Use a Photo from Gallery',
+                              ),
+                            ),
+                          ),
+                          if (_backgroundTheme == 'photo' && _themePhotoUrl != null) ...[
+                            const SizedBox(height: 8),
+                            const Text(
+                              '✓ Custom photo in use',
+                              style: TextStyle(fontSize: 12, color: Colors.white54),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Card(
                     child: SwitchListTile(
                       title: const Text('Anonymous Judging'),
                       subtitle: const Text(
@@ -7452,6 +8717,7 @@ try {
                 ],
               ),
             ),
+      ),
     );
   }
 }
@@ -7612,7 +8878,11 @@ class _ScoreSliderState extends State<_ScoreSlider> {
     );
   }
 }
-const List<String> kRuleIcons = ['📸', '⏰', '⚖️', '🚫', '👑', '💬', '🏆', '❗'];
+const List<String> kRuleIcons = [
+  '📸', '⏰', '⚖️', '🚫', '👑', '💬', '🏆', '🔥',
+  '🎯', '🪙', '🤳', '🖼️', '🔁', '🎭', '⚠️', '🛡️',
+  '📅', '🤝', '❗',
+];
 
 class RulesPage extends StatefulWidget {
   final dynamic group;
@@ -7644,8 +8914,58 @@ class _RulesPageState extends State<RulesPage> {
 
   // Best-effort icon guess for legacy rule lines that don't have an
   // explicit 'icon::text' marker, so they don't all default to the same icon.
+  // Ordered most-specific-first, since a line like "No filters or edited
+  // photos" would otherwise always fall through to the generic camera icon
+  // just because it mentions "photos" too.
   String _guessIcon(String text) {
     final lower = text.toLowerCase();
+
+    if (lower.contains('filter') || lower.contains('edit') || lower.contains('photoshop')) {
+      return '🖼️';
+    }
+    if (lower.contains('selfie') || lower.contains('face')) {
+      return '🤳';
+    }
+    if (lower.contains('streak')) {
+      return '🔥';
+    }
+    if (lower.contains('challenge') || lower.contains('theme') || lower.contains('prompt')) {
+      return '🎯';
+    }
+    if (lower.contains('coin') ||
+        lower.contains('store') ||
+        lower.contains('shop') ||
+        lower.contains('purchase') ||
+        lower.contains('buy')) {
+      return '🪙';
+    }
+    if (lower.contains('anonymous') || lower.contains('secret') || lower.contains('hidden')) {
+      return '🎭';
+    }
+    if (lower.contains('disqualif') || lower.contains('cheat') || lower.contains('fake')) {
+      return '🛡️';
+    }
+    if (lower.contains('warn') || lower.contains('penalty') || lower.contains('strike')) {
+      return '⚠️';
+    }
+    if (lower.contains('resubmit') ||
+        lower.contains('retake') ||
+        lower.contains('redo') ||
+        lower.contains('again')) {
+      return '🔁';
+    }
+    if (lower.contains('respect') ||
+        lower.contains('fair') ||
+        lower.contains('kind') ||
+        lower.contains('sportsmanship')) {
+      return '🤝';
+    }
+    if (lower.contains('daily') ||
+        lower.contains('every day') ||
+        lower.contains('each day') ||
+        lower.contains('schedule')) {
+      return '📅';
+    }
     if (lower.contains('photo') ||
         lower.contains('camera') ||
         lower.contains('picture') ||
@@ -7878,7 +9198,9 @@ class _RulesPageState extends State<RulesPage> {
             ),
         ],
       ),
-      body: Column(
+      body: AppBackground(
+        group: widget.group,
+        child: Column(
         children: [
           Expanded(
             child: _loading
@@ -7936,6 +9258,7 @@ class _RulesPageState extends State<RulesPage> {
               ),
             ),
         ],
+      ),
       ),
     );
   }
@@ -8166,7 +9489,9 @@ final Map<String, Future<String>> _signedUrlCache = {};
       appBar: AppBar(
         title: const Text('Group Chat'),
       ),
-      body: Column(
+      body: AppBackground(
+        group: widget.group,
+        child: Column(
         children: [
           Expanded(
             child: _loading
@@ -8302,6 +9627,7 @@ final Map<String, Future<String>> _signedUrlCache = {};
           ),
         ],
       ),
+      ),
       bottomNavigationBar: buildGroupBottomNav(context, widget.group, 2),
     );
   }
@@ -8402,7 +9728,9 @@ class _NotificationSettingsPageState extends State<NotificationSettingsPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Notifications')),
-      body: _loading
+      body: AppBackground(
+        group: widget.group,
+        child: _loading
           ? const Center(child: CircularProgressIndicator())
           : Padding(
               padding: const EdgeInsets.all(20),
@@ -8465,6 +9793,7 @@ class _NotificationSettingsPageState extends State<NotificationSettingsPage> {
                 ],
               ),
             ),
+      ),
     );
   }
 }
@@ -8905,7 +10234,9 @@ Future<void> _issueWarning(Map<String, dynamic> member) async {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Manage Members')),
-      body: _loading
+      body: AppBackground(
+        group: widget.group,
+        child: _loading
           ? const Center(child: CircularProgressIndicator())
           : ListView(
               padding: EdgeInsets.fromLTRB(16, 16, 16, MediaQuery.of(context).padding.bottom + 16),
@@ -8914,6 +10245,7 @@ Future<void> _issueWarning(Map<String, dynamic> member) async {
                 ..._members.map(_memberCard),
               ],
             ),
+      ),
     );
   }
 }
@@ -9301,7 +10633,8 @@ Future<void> _showDeleteConfirmation() async {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('My Profile')),
-      body: _loading
+      body: AppBackground(
+        child: _loading
           ? const Center(child: CircularProgressIndicator())
           : SingleChildScrollView(
               padding: EdgeInsets.fromLTRB(24, 24, 24, MediaQuery.of(context).padding.bottom + 24),
@@ -9507,6 +10840,7 @@ Future<void> _showDeleteConfirmation() async {
                 ],
               ),
             ),
+      ),
     );
   }
 }
