@@ -31,6 +31,25 @@ const kSurfaceColor = Color(0xFF1E1A24);
 const kAccentGold = Color(0xFFF3A93B);
 const kAccentTeal = Color(0xFF4FD1C2);
 
+class StatOption {
+  final String key;
+  final String label;
+  final String suffix;
+
+  const StatOption({required this.key, required this.label, this.suffix = ''});
+}
+
+const kStatOptions = [
+  StatOption(key: 'wins', label: '🏆 Wins'),
+  StatOption(key: 'currentStreak', label: '🔥 Streak'),
+  StatOption(key: 'longestStreak', label: '⭐ Best Streak'),
+  StatOption(key: 'submissions', label: '📸 Photos Submitted'),
+  StatOption(key: 'disqualifications', label: '🚫 Disqualifications'),
+  StatOption(key: 'winRate', label: '📊 Win Rate', suffix: '%'),
+];
+
+const kDefaultStatKeys = ['wins', 'currentStreak', 'longestStreak'];
+
 class DoodleBackground extends StatelessWidget {
   const DoodleBackground({super.key});
 
@@ -674,6 +693,46 @@ class _LoginPageState extends State<LoginPage> {
       ),
     );
   }
+}
+
+/// Total photos submitted per user in a group.
+Future<Map<String, int>> fetchGroupSubmissionCounts(String groupId) async {
+  final supabase = Supabase.instance.client;
+  final submissions = await supabase.from('submissions').select().eq('group_id', groupId);
+
+  final counts = <String, int>{};
+  for (final s in submissions) {
+    final uid = s['user_id'] as String;
+    counts[uid] = (counts[uid] ?? 0) + 1;
+  }
+  return counts;
+}
+
+/// Disqualification counts per user in a group (scores marked disqualified
+/// on that user's own submissions).
+Future<Map<String, int>> fetchGroupDisqualificationCounts(String groupId) async {
+  final supabase = Supabase.instance.client;
+  final submissions = await supabase.from('submissions').select().eq('group_id', groupId);
+  if (submissions.isEmpty) return {};
+
+  final submissionIds = submissions.map((s) => s['id']).toList();
+  final scores = await supabase
+      .from('scores')
+      .select()
+      .inFilter('submission_id', submissionIds)
+      .eq('disqualified', true);
+
+  final counts = <String, int>{};
+  for (final sc in scores) {
+    final submission = submissions.firstWhere(
+      (s) => s['id'] == sc['submission_id'],
+      orElse: () => <String, dynamic>{},
+    );
+    if (submission.isEmpty) continue;
+    final uid = submission['user_id'] as String;
+    counts[uid] = (counts[uid] ?? 0) + 1;
+  }
+  return counts;
 }
 
 /// Win counts per user in a group: for each day with judged submissions,
@@ -1517,6 +1576,7 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
   bool _uploading = false;
   String? _statsLeftUserId;
   String? _statsRightUserId;
+  Set<String> _selectedStatKeys = kDefaultStatKeys.toSet();
 
   @override
   void initState() {
@@ -1524,6 +1584,14 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
     _loadMyRole();
     _maybeShowChallengePopup();
     _maybeShowWinCelebration();
+    _loadSelectedStatKeys();
+  }
+
+  Future<void> _loadSelectedStatKeys() async {
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getStringList('stats_bar_keys');
+    if (saved == null || saved.isEmpty || !mounted) return;
+    setState(() => _selectedStatKeys = saved.toSet());
   }
 
   Future<void> _maybeShowWinCelebration() async {
@@ -1789,6 +1857,8 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
     final wins = await fetchGroupWinCounts(widget.group['id']);
     final currentStreaks = await fetchGroupStreaks(widget.group['id']);
     final longestStreaks = await fetchGroupLongestStreaks(widget.group['id']);
+    final submissionCounts = await fetchGroupSubmissionCounts(widget.group['id']);
+    final disqualifications = await fetchGroupDisqualificationCounts(widget.group['id']);
 
     final stats = members.map((m) {
       final uid = m['user_id'];
@@ -1796,12 +1866,17 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
         (u) => u['id'] == uid,
         orElse: () => {'username': 'Unknown'},
       );
+      final submissions = submissionCounts[uid] ?? 0;
+      final winCount = wins[uid] ?? 0;
       return {
         'user_id': uid,
         'username': user['username'],
-        'wins': wins[uid] ?? 0,
+        'wins': winCount,
         'currentStreak': currentStreaks[uid] ?? 0,
         'longestStreak': longestStreaks[uid] ?? 0,
+        'submissions': submissions,
+        'disqualifications': disqualifications[uid] ?? 0,
+        'winRate': submissions == 0 ? 0 : ((winCount / submissions) * 100).round(),
       };
     }).toList();
 
@@ -1813,9 +1888,9 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
   Widget _buildStatsBar(List<Map<String, dynamic>> stats) {
     Map<String, dynamic> a;
     Map<String, dynamic> b;
-    final showPicker = stats.length > 2;
+    final canPickPlayers = stats.length > 2;
 
-    if (!showPicker) {
+    if (!canPickPlayers) {
       a = stats[0];
       b = stats[1];
     } else {
@@ -1833,14 +1908,14 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
       );
     }
 
-    Widget statRow(String label, int aVal, int bVal) {
+    Widget statRow(StatOption option, int aVal, int bVal) {
       return Padding(
         padding: const EdgeInsets.symmetric(vertical: 6),
         child: Row(
           children: [
             Expanded(
               child: Text(
-                '$aVal',
+                '$aVal${option.suffix}',
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   fontSize: 16,
@@ -1850,16 +1925,16 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
               ),
             ),
             SizedBox(
-              width: 96,
+              width: 110,
               child: Text(
-                label,
+                option.label,
                 textAlign: TextAlign.center,
                 style: TextStyle(fontSize: 11, color: Colors.white.withOpacity(0.6)),
               ),
             ),
             Expanded(
               child: Text(
-                '$bVal',
+                '$bVal${option.suffix}',
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   fontSize: 16,
@@ -1872,6 +1947,8 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
         ),
       );
     }
+
+    final activeOptions = kStatOptions.where((o) => _selectedStatKeys.contains(o.key)).toList();
 
     return Card(
       child: Padding(
@@ -1887,17 +1964,15 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
                   'Head to Head',
                   style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
                 ),
-                if (showPicker) ...[
-                  const Spacer(),
-                  InkWell(
-                    borderRadius: BorderRadius.circular(20),
-                    onTap: () => _openComparePicker(stats),
-                    child: const Padding(
-                      padding: EdgeInsets.all(6),
-                      child: FaIcon(FontAwesomeIcons.sliders, size: 16, color: Colors.white70),
-                    ),
+                const Spacer(),
+                InkWell(
+                  borderRadius: BorderRadius.circular(20),
+                  onTap: () => _openComparePicker(stats, canPickPlayers),
+                  child: const Padding(
+                    padding: EdgeInsets.all(6),
+                    child: FaIcon(FontAwesomeIcons.sliders, size: 16, color: Colors.white70),
                   ),
-                ],
+                ),
               ],
             ),
             const SizedBox(height: 14),
@@ -1936,18 +2011,17 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
               ],
             ),
             const Divider(height: 24),
-            statRow('🏆 Wins', a['wins'] as int, b['wins'] as int),
-            statRow('🔥 Streak', a['currentStreak'] as int, b['currentStreak'] as int),
-            statRow('⭐ Best Streak', a['longestStreak'] as int, b['longestStreak'] as int),
+            for (final option in activeOptions)
+              statRow(option, a[option.key] as int, b[option.key] as int),
           ],
         ),
       ),
     );
   }
 
-  Future<void> _openComparePicker(List<Map<String, dynamic>> stats) async {
+  Future<void> _openComparePicker(List<Map<String, dynamic>> stats, bool showPlayerPicker) async {
     final myId = Supabase.instance.client.auth.currentUser?.id;
-    final result = await showModalBottomSheet<Map<String, String?>>(
+    final result = await showModalBottomSheet<Map<String, dynamic>>(
       context: context,
       isScrollControlled: true,
       backgroundColor: kSurfaceColor,
@@ -1956,17 +2030,27 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
       ),
       builder: (_) => _ComparePickerSheet(
         stats: stats,
+        showPlayerPicker: showPlayerPicker,
         initialLeftId: _statsLeftUserId ?? myId,
         initialRightId: _statsRightUserId,
+        initialSelectedStats: _selectedStatKeys,
       ),
     );
 
-    if (result != null && mounted) {
-      setState(() {
-        _statsLeftUserId = result['left'];
-        _statsRightUserId = result['right'];
-      });
-    }
+    if (result == null || !mounted) return;
+
+    final statKeys = (result['statKeys'] as List).cast<String>();
+
+    setState(() {
+      if (showPlayerPicker) {
+        _statsLeftUserId = result['left'] as String?;
+        _statsRightUserId = result['right'] as String?;
+      }
+      _selectedStatKeys = statKeys.toSet();
+    });
+
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList('stats_bar_keys', statKeys);
   }
 
   Future<List<Map<String, dynamic>>> fetchBattleStatus() async {
@@ -3178,7 +3262,7 @@ body: Stack(
                               padding: const EdgeInsets.symmetric(vertical: 4),
                               child: Row(
                                 children: [
-                                  FaIcon(roleIconData(player['role']), size: 18, color: Colors.white70),
+                                  roleIcon(player['role'], size: 18, color: Colors.white70),
                                   const SizedBox(width: 10),
                                   Expanded(
                                     child: Text(
@@ -3288,10 +3372,11 @@ body: Stack(
                                                     color: kBgColor,
                                                     shape: BoxShape.circle,
                                                   ),
-                                                  child: FaIcon(
-                                                    roleIconData(m['role']),
+                                                  child: roleIcon(
+                                                    m['role'],
                                                     size: 9,
                                                     color: Colors.white70,
+                                                    compact: true,
                                                   ),
                                                 ),
                                               ),
@@ -3423,11 +3508,15 @@ class _WinCelebrationDialogState extends State<_WinCelebrationDialog> {
 
 class _ComparePickerSheet extends StatefulWidget {
   final List<Map<String, dynamic>> stats;
+  final bool showPlayerPicker;
   final String? initialLeftId;
   final String? initialRightId;
+  final Set<String> initialSelectedStats;
 
   const _ComparePickerSheet({
     required this.stats,
+    required this.showPlayerPicker,
+    required this.initialSelectedStats,
     this.initialLeftId,
     this.initialRightId,
   });
@@ -3440,12 +3529,14 @@ class _ComparePickerSheetState extends State<_ComparePickerSheet> {
   String? _leftId;
   String? _rightId;
   String _activeSlot = 'left';
+  late Set<String> _selectedStats;
 
   @override
   void initState() {
     super.initState();
     _leftId = widget.initialLeftId;
     _rightId = widget.initialRightId;
+    _selectedStats = Set.of(widget.initialSelectedStats);
   }
 
   Map<String, dynamic>? _findById(String? id) {
@@ -3503,6 +3594,9 @@ class _ComparePickerSheetState extends State<_ComparePickerSheet> {
 
   @override
   Widget build(BuildContext context) {
+    final canSave = _selectedStats.isNotEmpty &&
+        (!widget.showPlayerPicker || (_leftId != null && _rightId != null));
+
     return Padding(
       padding: EdgeInsets.only(
         left: 20,
@@ -3512,96 +3606,134 @@ class _ComparePickerSheetState extends State<_ComparePickerSheet> {
             MediaQuery.of(context).padding.bottom +
             20,
       ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Center(
-            child: Container(
-              width: 40,
-              height: 4,
-              decoration: BoxDecoration(
-                color: Colors.white24,
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-          ),
-          const SizedBox(height: 16),
-          const Text(
-            'Compare Players',
-            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-            textAlign: TextAlign.center,
-          ),
-          const SizedBox(height: 20),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              _slot(_leftId, _activeSlot == 'left', () => setState(() => _activeSlot = 'left')),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 10),
-                child: Text(
-                  'VS',
-                  style: TextStyle(color: kAccentGold, fontWeight: FontWeight.w900, fontSize: 16),
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Center(
+              child: Container(
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.white24,
+                  borderRadius: BorderRadius.circular(2),
                 ),
               ),
-              _slot(_rightId, _activeSlot == 'right', () => setState(() => _activeSlot = 'right')),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              widget.showPlayerPicker ? 'Compare Players' : 'Customize Stats',
+              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+              textAlign: TextAlign.center,
+            ),
+            if (widget.showPlayerPicker) ...[
+              const SizedBox(height: 20),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  _slot(_leftId, _activeSlot == 'left', () => setState(() => _activeSlot = 'left')),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 10),
+                    child: Text(
+                      'VS',
+                      style: TextStyle(color: kAccentGold, fontWeight: FontWeight.w900, fontSize: 16),
+                    ),
+                  ),
+                  _slot(_rightId, _activeSlot == 'right', () => setState(() => _activeSlot = 'right')),
+                ],
+              ),
+              const SizedBox(height: 20),
+              const Divider(height: 1),
+              const SizedBox(height: 12),
+              Text(
+                _activeSlot == 'left' ? 'Pick the left player' : 'Pick the right player',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Colors.white.withOpacity(0.5),
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 6),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 220),
+                child: ListView(
+                  shrinkWrap: true,
+                  children: widget.stats.map((s) {
+                    final uid = s['user_id'] as String;
+                    final selected = _activeSlot == 'left' ? _leftId == uid : _rightId == uid;
+                    final disabled = _activeSlot == 'left' ? _rightId == uid : _leftId == uid;
+                    return ListTile(
+                      enabled: !disabled,
+                      leading: _MemberAvatar(username: s['username'] ?? '?', color: kAccentGold, size: 32),
+                      title: Text(s['username'] ?? '?'),
+                      trailing: selected
+                          ? const FaIcon(FontAwesomeIcons.check, size: 16, color: kAccentGold)
+                          : null,
+                      onTap: disabled
+                          ? null
+                          : () {
+                              setState(() {
+                                if (_activeSlot == 'left') {
+                                  _leftId = uid;
+                                  _activeSlot = 'right';
+                                } else {
+                                  _rightId = uid;
+                                  _activeSlot = 'left';
+                                }
+                              });
+                            },
+                    );
+                  }).toList(),
+                ),
+              ),
             ],
-          ),
-          const SizedBox(height: 20),
-          const Divider(height: 1),
-          const SizedBox(height: 12),
-          Text(
-            _activeSlot == 'left' ? 'Pick the left player' : 'Pick the right player',
-            style: TextStyle(
-              fontSize: 12,
-              color: Colors.white.withOpacity(0.5),
-              fontWeight: FontWeight.bold,
+            const SizedBox(height: 20),
+            const Divider(height: 1),
+            const SizedBox(height: 12),
+            Text(
+              'Stats to show',
+              style: TextStyle(
+                fontSize: 12,
+                color: Colors.white.withOpacity(0.5),
+                fontWeight: FontWeight.bold,
+              ),
             ),
-          ),
-          const SizedBox(height: 6),
-          ConstrainedBox(
-            constraints: const BoxConstraints(maxHeight: 260),
-            child: ListView(
-              shrinkWrap: true,
-              children: widget.stats.map((s) {
-                final uid = s['user_id'] as String;
-                final selected = _activeSlot == 'left' ? _leftId == uid : _rightId == uid;
-                final disabled = _activeSlot == 'left' ? _rightId == uid : _leftId == uid;
-                return ListTile(
-                  enabled: !disabled,
-                  leading: _MemberAvatar(username: s['username'] ?? '?', color: kAccentGold, size: 32),
-                  title: Text(s['username'] ?? '?'),
-                  trailing: selected
-                      ? const FaIcon(FontAwesomeIcons.check, size: 16, color: kAccentGold)
-                      : null,
-                  onTap: disabled
-                      ? null
-                      : () {
-                          setState(() {
-                            if (_activeSlot == 'left') {
-                              _leftId = uid;
-                              _activeSlot = 'right';
-                            } else {
-                              _rightId = uid;
-                              _activeSlot = 'left';
-                            }
-                          });
-                        },
-                );
-              }).toList(),
+            ...kStatOptions.map((option) {
+              final checked = _selectedStats.contains(option.key);
+              return CheckboxListTile(
+                value: checked,
+                title: Text(option.label),
+                activeColor: kAccentGold,
+                contentPadding: EdgeInsets.zero,
+                controlAffinity: ListTileControlAffinity.leading,
+                onChanged: (value) {
+                  setState(() {
+                    if (value == true) {
+                      _selectedStats.add(option.key);
+                    } else {
+                      _selectedStats.remove(option.key);
+                    }
+                  });
+                },
+              );
+            }),
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton(
+                onPressed: canSave
+                    ? () => Navigator.pop(context, {
+                          'left': _leftId,
+                          'right': _rightId,
+                          'statKeys': _selectedStats.toList(),
+                        })
+                    : null,
+                child: Text(widget.showPlayerPicker ? 'Compare' : 'Save'),
+              ),
             ),
-          ),
-          const SizedBox(height: 16),
-          SizedBox(
-            width: double.infinity,
-            child: ElevatedButton(
-              onPressed: (_leftId != null && _rightId != null)
-                  ? () => Navigator.pop(context, {'left': _leftId, 'right': _rightId})
-                  : null,
-              child: const Text('Compare'),
-            ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -5989,10 +6121,44 @@ Color hexToColor(String hex) {
 }
 
 FaIconData roleIconData(String? role) {
-  if (role == 'owner') return FontAwesomeIcons.userGear;
+  if (role == 'owner') return FontAwesomeIcons.shieldHalved;
   if (role == 'player') return FontAwesomeIcons.handFist;
   if (role == 'judge') return FontAwesomeIcons.scaleBalanced;
   return FontAwesomeIcons.userCircle;
+}
+
+/// Role icon widget — owner gets a shield with a small gear badge (admin,
+/// not "winner"), everyone else gets a plain [roleIconData] glyph. Use
+/// [compact] for very small contexts (e.g. an avatar badge) where the gear
+/// overlay would be illegible.
+Widget roleIcon(
+  String? role, {
+  double size = 18,
+  Color color = Colors.white70,
+  bool compact = false,
+}) {
+  if (role == 'owner' && !compact) {
+    return SizedBox(
+      width: size,
+      height: size,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          FaIcon(FontAwesomeIcons.shieldHalved, size: size, color: color),
+          Positioned(
+            right: -size * 0.22,
+            bottom: -size * 0.12,
+            child: Container(
+              padding: EdgeInsets.all(size * 0.06),
+              decoration: const BoxDecoration(color: kBgColor, shape: BoxShape.circle),
+              child: FaIcon(FontAwesomeIcons.gear, size: size * 0.5, color: color),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+  return FaIcon(roleIconData(role), size: size, color: color);
 }
 
 const List<String> kChallengePrompts = [
@@ -7894,7 +8060,7 @@ Future<void> _issueWarning(Map<String, dynamic> member) async {
 
     return Card(
       child: ListTile(
-        leading: FaIcon(roleIconData(member['role']), size: 24, color: Colors.white70),
+        leading: roleIcon(member['role'], size: 24, color: Colors.white70),
         title: Text(member['username'] ?? 'Unknown'),
         subtitle: Text(
           isOwnerRow
