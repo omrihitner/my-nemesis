@@ -113,7 +113,9 @@ serve(async (_req) => {
   try {
     const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-    const { data: groups } = await supabase.from("groups").select("id");
+    const { data: groups } = await supabase
+      .from("groups")
+      .select("id, frozen_user_id, frozen_date");
     if (!groups || groups.length === 0) {
       return new Response(JSON.stringify({ sent: 0 }), { status: 200 });
     }
@@ -122,6 +124,7 @@ serve(async (_req) => {
     startOfDay.setUTCHours(0, 0, 0, 0);
     const endOfDay = new Date(startOfDay);
     endOfDay.setUTCDate(endOfDay.getUTCDate() + 1);
+    const todayKey = startOfDay.toISOString().slice(0, 10);
 
     let sent = 0;
 
@@ -149,8 +152,11 @@ serve(async (_req) => {
       const submittedIds = new Set(
         (submissions ?? []).map((s: any) => s.user_id)
       );
+      const isFrozenToday = group.frozen_date === todayKey;
       const pending = eligible.filter(
-        (m: any) => !submittedIds.has(m.user_id)
+        (m: any) =>
+          !submittedIds.has(m.user_id) &&
+          !(isFrozenToday && m.user_id === group.frozen_user_id)
       );
       if (pending.length === 0) continue;
 

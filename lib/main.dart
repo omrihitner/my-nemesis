@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:ui';
 import 'package:image_picker/image_picker.dart';
+import 'package:photo_manager/photo_manager.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -108,11 +109,26 @@ const kStoreItems = [
     key: 'freeze',
     name: 'Freeze',
     cost: 30,
-    description: 'Force a rival to skip a day. Coming soon.',
+    description: 'Force a rival to skip tomorrow — they can\'t upload until the day after.',
     icon: FontAwesomeIcons.snowflake,
-    comingSoon: true,
   ),
 ];
+
+/// Signs many storage paths in a single network round trip instead of one
+/// request per photo — the biggest lever for "photos take a while to load"
+/// on any page showing more than one image at once (Judge Photos,
+/// Leaderboard, Calendar, Photo Roulette, etc.). Missing/failed paths are
+/// simply absent from the returned map.
+Future<Map<String, String>> createSignedUrlMap(List<String> paths, {String bucket = 'Photos'}) async {
+  if (paths.isEmpty) return {};
+  final supabase = Supabase.instance.client;
+  final results = await supabase.storage.from(bucket).createSignedUrlsResult(paths, 60 * 60);
+  final map = <String, String>{};
+  for (final r in results) {
+    if (r is SignedUrlSuccess) map[r.path] = r.signedUrl;
+  }
+  return map;
+}
 
 Future<int> fetchCoinBalance(String groupId, String userId) async {
   final supabase = Supabase.instance.client;
@@ -127,6 +143,212 @@ Future<int> fetchCoinBalance(String groupId, String userId) async {
     total += (r['amount'] ?? 0) as int;
   }
   return total;
+}
+
+class RankTier {
+  final String name;
+  final int minCoins;
+  final String emoji;
+  final Color color;
+  final int winBonus;
+
+  const RankTier({
+    required this.name,
+    required this.minCoins,
+    required this.emoji,
+    required this.color,
+    required this.winBonus,
+  });
+}
+
+/// Meta-progression ladder based on *lifetime coins earned* (never spent
+/// balance, which can only go down) — a number that keeps climbing forever,
+/// so there's always a reason to earn more even on a day you're not winning.
+/// [winBonus] is a real perk: extra coins added on top of the flat daily-win
+/// payout once a member reaches that tier — see its use in
+/// [_GroupDashboardPageState._settleCoinPayouts].
+const List<RankTier> kRankTiers = [
+  RankTier(name: 'Bronze', minCoins: 0, emoji: '🥉', color: Color(0xFFCD7F32), winBonus: 0),
+  RankTier(name: 'Silver', minCoins: 50, emoji: '🥈', color: Color(0xFFC0C0C0), winBonus: 1),
+  RankTier(name: 'Gold', minCoins: 150, emoji: '🥇', color: kAccentGold, winBonus: 2),
+  RankTier(name: 'Platinum', minCoins: 400, emoji: '💎', color: kAccentTeal, winBonus: 3),
+  RankTier(name: 'Diamond', minCoins: 800, emoji: '👑', color: Color(0xFFB9F2FF), winBonus: 5),
+];
+
+RankTier rankForCoins(int coinsEarned) {
+  var current = kRankTiers.first;
+  for (final tier in kRankTiers) {
+    if (coinsEarned >= tier.minCoins) current = tier;
+  }
+  return current;
+}
+
+/// Null once a member has reached the top tier.
+RankTier? nextRankForCoins(int coinsEarned) {
+  for (final tier in kRankTiers) {
+    if (coinsEarned < tier.minCoins) return tier;
+  }
+  return null;
+}
+
+/// Single-user version of [fetchGroupLifetimeCoinsEarned], for pages that
+/// only need the current user's total (e.g. the Store's rank card).
+Future<int> fetchLifetimeCoinsEarned(String groupId, String userId) async {
+  final supabase = Supabase.instance.client;
+  final rows = await supabase
+      .from('coin_transactions')
+      .select('amount')
+      .eq('group_id', groupId)
+      .eq('user_id', userId)
+      .gt('amount', 0);
+
+  var total = 0;
+  for (final r in rows) {
+    total += (r['amount'] ?? 0) as int;
+  }
+  return total;
+}
+
+/// Lifetime coins *earned* per member of a group — only positive ledger
+/// entries count, so spending at the Store never lowers your rank.
+Future<Map<String, int>> fetchGroupLifetimeCoinsEarned(String groupId) async {
+  final supabase = Supabase.instance.client;
+  final rows = await supabase
+      .from('coin_transactions')
+      .select('user_id, amount')
+      .eq('group_id', groupId)
+      .gt('amount', 0);
+
+  final totals = <String, int>{};
+  for (final r in rows) {
+    final uid = r['user_id'] as String;
+    totals[uid] = (totals[uid] ?? 0) + (r['amount'] as int);
+  }
+  return totals;
+}
+
+/// A small tappable icon-only badge — deliberately compact so it doesn't
+/// clutter member rows the way a full text pill did. Tapping it opens
+/// [showRankDetailsSheet] with the full explanation (current perk, progress
+/// to next tier, the whole ladder).
+class RankBadge extends StatelessWidget {
+  final int coinsEarned;
+  final double size;
+
+  const RankBadge({super.key, required this.coinsEarned, this.size = 18});
+
+  @override
+  Widget build(BuildContext context) {
+    final tier = rankForCoins(coinsEarned);
+    return GestureDetector(
+      onTap: () => showRankDetailsSheet(context, coinsEarned),
+      child: Container(
+        width: size,
+        height: size,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: tier.color.withOpacity(0.18),
+          shape: BoxShape.circle,
+          border: Border.all(color: tier.color.withOpacity(0.6)),
+        ),
+        child: Text(tier.emoji, style: TextStyle(fontSize: size * 0.55)),
+      ),
+    );
+  }
+}
+
+void showRankDetailsSheet(BuildContext context, int coinsEarned) {
+  final tier = rankForCoins(coinsEarned);
+  final next = nextRankForCoins(coinsEarned);
+  final progress =
+      next == null ? 1.0 : (coinsEarned - tier.minCoins) / (next.minCoins - tier.minCoins);
+
+  showModalBottomSheet(
+    context: context,
+    backgroundColor: kSurfaceColor,
+    isScrollControlled: true,
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+    ),
+    builder: (context) => Padding(
+      padding: EdgeInsets.fromLTRB(20, 20, 20, MediaQuery.of(context).padding.bottom + 20),
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Text(tier.emoji, style: const TextStyle(fontSize: 32)),
+                const SizedBox(width: 10),
+                Text(
+                  'Your rank: ${tier.name}',
+                  style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: tier.color),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(
+              '$coinsEarned lifetime coins earned in this group',
+              style: TextStyle(fontSize: 12, color: Colors.white.withOpacity(0.5)),
+            ),
+            const SizedBox(height: 18),
+            if (next != null) ...[
+              ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: LinearProgressIndicator(
+                  value: progress.clamp(0, 1),
+                  minHeight: 8,
+                  backgroundColor: Colors.white12,
+                  valueColor: AlwaysStoppedAnimation(next.color),
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'Earn ${next.minCoins - coinsEarned} more lifetime coins to reach ${next.name}.',
+                style: TextStyle(fontSize: 12, color: Colors.white.withOpacity(0.6)),
+              ),
+            ] else
+              const Text('🎉 Max rank reached!', style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 20),
+            const Divider(),
+            const SizedBox(height: 8),
+            const Text('All Ranks', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+            const SizedBox(height: 8),
+            ...kRankTiers.map((t) {
+              final isCurrent = t.name == tier.name;
+              return Padding(
+                padding: const EdgeInsets.symmetric(vertical: 5),
+                child: Row(
+                  children: [
+                    Text(t.emoji, style: const TextStyle(fontSize: 18)),
+                    const SizedBox(width: 8),
+                    Text(
+                      t.name,
+                      style: TextStyle(
+                        fontWeight: isCurrent ? FontWeight.bold : FontWeight.normal,
+                        color: isCurrent ? t.color : Colors.white70,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      '(${t.minCoins}+ lifetime coins)',
+                      style: TextStyle(fontSize: 11, color: Colors.white.withOpacity(0.4)),
+                    ),
+                    const Spacer(),
+                    Text(
+                      t.winBonus > 0 ? '+${t.winBonus} 🪙 per win' : 'no bonus',
+                      style: TextStyle(fontSize: 12, color: Colors.white.withOpacity(0.6)),
+                    ),
+                  ],
+                ),
+              );
+            }),
+          ],
+        ),
+      ),
+    ),
+  );
 }
 
 class DoodleBackground extends StatelessWidget {
@@ -896,7 +1118,17 @@ class DayOutcome {
 /// already-fetched day's submissions plus the full scores list for the
 /// range they came from — callers own the fetching/bucketing so this stays
 /// a pure, reusable computation rather than another duplicated DB round trip.
-DayOutcome computeDayOutcome(List<dynamic> daySubmissions, List<dynamic> allScores) {
+///
+/// [isPastDay] should be true only for days that are fully over (never
+/// today, which may just not be judged *yet*). For a past day where nobody
+/// ever judged any submission, the earliest submitter wins by default —
+/// otherwise a day with real entries would silently pay out no win and no
+/// coins just because judges never showed up.
+DayOutcome computeDayOutcome(
+  List<dynamic> daySubmissions,
+  List<dynamic> allScores, {
+  bool isPastDay = false,
+}) {
   final totals = <String, int>{};
   final submittedTimes = <String, String>{};
   final judgeIds = <String>{};
@@ -915,6 +1147,12 @@ DayOutcome computeDayOutcome(List<dynamic> daySubmissions, List<dynamic> allScor
   }
 
   if (totals.isEmpty) {
+    if (isPastDay && submittedTimes.isNotEmpty) {
+      final firstSubmitterId = submittedTimes.entries
+          .reduce((a, b) => a.value.compareTo(b.value) <= 0 ? a : b)
+          .key;
+      return DayOutcome(totals: {firstSubmitterId: 0}, winnerId: firstSubmitterId, judgeIds: judgeIds);
+    }
     return DayOutcome(totals: totals, winnerId: null, judgeIds: judgeIds);
   }
 
@@ -955,9 +1193,13 @@ Future<Map<String, int>> fetchGroupWinCounts(
   }
 
   final wins = <String, int>{};
+  final today = DateTime.now();
+  final startOfToday = DateTime(today.year, today.month, today.day);
 
-  for (final daySubs in byDay.values) {
-    final outcome = computeDayOutcome(daySubs, scores);
+  for (final entry in byDay.entries) {
+    final dayDate = DateTime.parse(entry.key);
+    final isPastDay = dayDate.isBefore(startOfToday);
+    final outcome = computeDayOutcome(entry.value, scores, isPastDay: isPastDay);
     if (outcome.winnerId != null) {
       wins[outcome.winnerId!] = (wins[outcome.winnerId!] ?? 0) + 1;
     }
@@ -1168,36 +1410,22 @@ Future<Map<String, int>> fetchUserAchievements(String userId) async {
     }
 
     // Wins: for each day, whoever had the highest total score (earliest
-    // submission breaking ties) is the winner.
+    // submission breaking ties, or the earliest submitter by default if the
+    // day was never judged) is the winner.
     final byDay = <String, List<dynamic>>{};
     for (final s in submissions) {
       final date = DateTime.parse(s['submitted_at'].toString());
       byDay.putIfAbsent(_dateKeyForStreak(date), () => []).add(s);
     }
 
-    for (final daySubs in byDay.values) {
-      final totals = <String, int>{};
-      final submittedTimes = <String, String>{};
+    final today = DateTime.now();
+    final startOfToday = DateTime(today.year, today.month, today.day);
 
-      for (final s in daySubs) {
-        final uid = s['user_id'] as String;
-        submittedTimes[uid] = s['submitted_at'].toString();
-        final subScores = groupScores.where((sc) => sc['submission_id'] == s['id']);
-        for (final sc in subScores) {
-          totals[uid] = (totals[uid] ?? 0) + ((sc['score'] ?? 0) as int);
-        }
-      }
-
-      if (totals.isEmpty) continue;
-
-      final maxScore = totals.values.reduce((a, b) => a > b ? a : b);
-      final topUserIds = totals.entries
-          .where((e) => e.value == maxScore)
-          .map((e) => e.key)
-          .toList()
-        ..sort((a, b) => submittedTimes[a]!.compareTo(submittedTimes[b]!));
-
-      if (topUserIds.first == userId) totalWins++;
+    for (final entry in byDay.entries) {
+      final dayDate = DateTime.parse(entry.key);
+      final isPastDay = dayDate.isBefore(startOfToday);
+      final outcome = computeDayOutcome(entry.value, groupScores, isPastDay: isPastDay);
+      if (outcome.winnerId == userId) totalWins++;
     }
   }
 
@@ -1799,6 +2027,7 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
   String? _statsLeftUserId;
   String? _statsRightUserId;
   Set<String> _selectedStatKeys = kDefaultStatKeys.toSet();
+  int _myLifetimeEarned = 0;
 
   @override
   void initState() {
@@ -1808,6 +2037,15 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
     _maybeShowWinCelebration();
     _loadSelectedStatKeys();
     _settleCoinPayouts(widget.group['id']);
+    _loadMyRank();
+  }
+
+  Future<void> _loadMyRank() async {
+    final user = Supabase.instance.client.auth.currentUser;
+    if (user == null) return;
+    final earned = await fetchLifetimeCoinsEarned(widget.group['id'], user.id);
+    if (!mounted) return;
+    setState(() => _myLifetimeEarned = earned);
   }
 
   Future<void> _loadSelectedStatKeys() async {
@@ -1859,6 +2097,10 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
           ? <dynamic>[]
           : await supabase.from('scores').select().inFilter('submission_id', submissionIds);
       final predictions = await supabase.from('predictions').select().eq('group_id', groupId);
+      // Tracks each member's lifetime-earned total as settlement progresses,
+      // so a win's rank-bonus reflects their rank *before* that win — mirrors
+      // how streakEndingOn only looks at days up to and including `day`.
+      final runningLifetimeEarned = Map<String, int>.from(await fetchGroupLifetimeCoinsEarned(groupId));
 
       final predictionsByDay = <String, List<dynamic>>{};
       for (final p in predictions) {
@@ -1886,8 +2128,8 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
         return streak;
       }
 
-      Future<void> award(String userId, int amount, String reason, String dayKey) {
-        return supabase.from('coin_transactions').upsert(
+      Future<void> award(String userId, int amount, String reason, String dayKey) async {
+        await supabase.from('coin_transactions').upsert(
           {
             'group_id': groupId,
             'user_id': userId,
@@ -1898,6 +2140,7 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
           onConflict: 'group_id,user_id,reason,reference_date',
           ignoreDuplicates: true,
         );
+        runningLifetimeEarned[userId] = (runningLifetimeEarned[userId] ?? 0) + amount;
       }
 
       for (var day = startDay; !day.isAfter(yesterday); day = day.add(const Duration(days: 1))) {
@@ -1907,11 +2150,12 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
         String? winnerId;
 
         if (daySubs.isNotEmpty) {
-          final outcome = computeDayOutcome(daySubs, scores);
+          final outcome = computeDayOutcome(daySubs, scores, isPastDay: true);
           winnerId = outcome.winnerId;
 
           if (outcome.winnerId != null) {
-            await award(outcome.winnerId!, 10, 'daily_win', dayKey);
+            final winBonus = rankForCoins(runningLifetimeEarned[outcome.winnerId!] ?? 0).winBonus;
+            await award(outcome.winnerId!, 10 + winBonus, 'daily_win', dayKey);
             if (streakEndingOn(outcome.winnerId!, day) >= 3) {
               await award(outcome.winnerId!, 5, 'streak_bonus', dayKey);
             }
@@ -2186,12 +2430,12 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
 
     final userIds = members.map((m) => m['user_id']).toList();
 
-    final users = await supabase
-        .from('users')
-        .select()
-        .inFilter('id', userIds);
-
-    final streaks = await fetchGroupStreaks(widget.group['id']);
+    final fetched = await Future.wait<dynamic>([
+      supabase.from('users').select().inFilter('id', userIds),
+      fetchGroupStreaks(widget.group['id']),
+    ]);
+    final users = fetched[0] as List;
+    final streaks = fetched[1] as Map<String, int>;
 
     return members.map<Map<String, dynamic>>((member) {
       final user = users.firstWhere(
@@ -2221,15 +2465,23 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
         .eq('group_id', widget.group['id']);
 
     final userIds = members.map((m) => m['user_id']).toList();
-    final users = userIds.isEmpty
-        ? <dynamic>[]
-        : await supabase.from('users').select().inFilter('id', userIds);
 
-    final wins = await fetchGroupWinCounts(widget.group['id']);
-    final currentStreaks = await fetchGroupStreaks(widget.group['id']);
-    final longestStreaks = await fetchGroupLongestStreaks(widget.group['id']);
-    final submissionCounts = await fetchGroupSubmissionCounts(widget.group['id']);
-    final disqualifications = await fetchGroupDisqualificationCounts(widget.group['id']);
+    final fetched = await Future.wait<dynamic>([
+      userIds.isEmpty
+          ? Future.value(<dynamic>[])
+          : supabase.from('users').select().inFilter('id', userIds),
+      fetchGroupWinCounts(widget.group['id']),
+      fetchGroupStreaks(widget.group['id']),
+      fetchGroupLongestStreaks(widget.group['id']),
+      fetchGroupSubmissionCounts(widget.group['id']),
+      fetchGroupDisqualificationCounts(widget.group['id']),
+    ]);
+    final users = fetched[0] as List;
+    final wins = fetched[1] as Map<String, int>;
+    final currentStreaks = fetched[2] as Map<String, int>;
+    final longestStreaks = fetched[3] as Map<String, int>;
+    final submissionCounts = fetched[4] as Map<String, int>;
+    final disqualifications = fetched[5] as Map<String, int>;
 
     final stats = members.map((m) {
       final uid = m['user_id'];
@@ -2440,22 +2692,23 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
 
     final userIds = battleMembers.map((m) => m['user_id']).toList();
 
-    final users = await supabase
-        .from('users')
-        .select()
-        .inFilter('id', userIds);
-
     final today = DateTime.now();
     final startOfDay = DateTime(today.year, today.month, today.day);
     final endOfDay = startOfDay.add(const Duration(days: 1));
 
-    final submissions = await supabase
-        .from('submissions')
-        .select()
-        .eq('group_id', widget.group['id'])
-        .inFilter('user_id', userIds)
-        .gte('submitted_at', startOfDay.toIso8601String())
-        .lt('submitted_at', endOfDay.toIso8601String());
+    // users and submissions both only depend on userIds, not each other.
+    final fetched = await Future.wait<dynamic>([
+      supabase.from('users').select().inFilter('id', userIds),
+      supabase
+          .from('submissions')
+          .select()
+          .eq('group_id', widget.group['id'])
+          .inFilter('user_id', userIds)
+          .gte('submitted_at', startOfDay.toIso8601String())
+          .lt('submitted_at', endOfDay.toIso8601String()),
+    ]);
+    final users = fetched[0] as List;
+    final submissions = fetched[1] as List;
 
     final submissionIds = submissions.map((s) => s['id']).toList();
 
@@ -2569,6 +2822,15 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
       final text = challengeTextFor(widget.group['id'], today,
           forcedChallengeDate: forcedDate, forcedChallengePrompt: forcedPrompt);
       notices.add({'text': '🎯 Today\'s Challenge: $text'});
+    }
+
+    final frozenUserId = widget.group['frozen_user_id'] as String?;
+    final frozenDate = widget.group['frozen_date'] as String?;
+    final currentUserId = Supabase.instance.client.auth.currentUser?.id;
+    if (frozenUserId != null &&
+        frozenUserId == currentUserId &&
+        frozenDate == _dateKeyForStreak(today)) {
+      notices.add({'text': '❄️ You\'ve been frozen today — you can\'t submit until tomorrow.'});
     }
 
     final results = await Future.wait([
@@ -3082,6 +3344,19 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
         todayStart.day,
       ).toIso8601String();
 
+      final frozenUserId = widget.group['frozen_user_id'] as String?;
+      final frozenDate = widget.group['frozen_date'] as String?;
+      if (frozenUserId == user.id && frozenDate == _dateKeyForStreak(todayStart)) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('❄️ You\'ve been frozen today — you can\'t submit until tomorrow.'),
+          ),
+        );
+        setState(() => _uploading = false);
+        return;
+      }
+
       final existingSubmission = await supabase
           .from('submissions')
           .select()
@@ -3103,31 +3378,37 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
         return;
       }
 
-      if (!mounted) return;
-      final confirmed = await showDialog<bool>(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: const Text('📸 Ready?'),
-          content: const Text(
-            'You\'ll take one photo right now for today\'s battle. No retakes, '
-            'no gallery picks — once you submit it, that\'s your entry for the day.',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('Cancel'),
-            ),
-            ElevatedButton(
-              onPressed: () => Navigator.pop(context, true),
-              child: const Text('I\'m Ready'),
-            ),
-          ],
-        ),
-      );
+      final prefs = await SharedPreferences.getInstance();
+      final seenReadyDialog = prefs.getBool('submit_ready_dialog_seen') ?? false;
 
-      if (confirmed != true) {
-        setState(() => _uploading = false);
-        return;
+      if (!seenReadyDialog) {
+        if (!mounted) return;
+        final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('📸 Ready?'),
+            content: const Text(
+              'You\'ll take one photo right now for today\'s battle. No retakes, '
+              'no gallery picks — once you submit it, that\'s your entry for the day.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Cancel'),
+              ),
+              ElevatedButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('I\'m Ready'),
+              ),
+            ],
+          ),
+        );
+
+        if (confirmed != true) {
+          setState(() => _uploading = false);
+          return;
+        }
+        await prefs.setBool('submit_ready_dialog_seen', true);
       }
 
       final picker = ImagePicker();
@@ -3147,10 +3428,13 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
       final filePath =
           '${widget.group['id']}/${user.id}/${DateTime.now().millisecondsSinceEpoch}.jpg';
 
-      await supabase.storage.from('Photos').upload(
-            filePath,
-            file,
-          );
+      // Upload and the notification's sender-profile lookup don't depend on
+      // each other — run them together instead of back-to-back.
+      final uploadResults = await Future.wait<dynamic>([
+        supabase.storage.from('Photos').upload(filePath, file),
+        supabase.from('users').select().eq('id', user.id).single(),
+      ]);
+      final userProfile = uploadResults[1] as Map<String, dynamic>;
 
       await supabase.from('submissions').insert({
         'group_id': widget.group['id'],
@@ -3158,14 +3442,10 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
         'photo_url': filePath,
       }).select().single();
 
-      // Notify other group members
-      final userProfile = await supabase
-          .from('users')
-          .select()
-          .eq('id', user.id)
-          .single();
-
-      await sendNotification(
+      // Fire-and-forget: the photo is already saved at this point, so the
+      // push-notification round trip (sendNotification swallows its own
+      // errors) shouldn't keep the user staring at a spinner.
+      sendNotification(
         type: 'upload',
         groupId: widget.group['id'],
         senderId: user.id,
@@ -3392,6 +3672,10 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
       appBar: AppBar(
         title: Text(groupName),
         actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 4),
+            child: RankBadge(coinsEarned: _myLifetimeEarned, size: 24),
+          ),
           if (isOwner)
             IconButton(
               icon: const FaIcon(FontAwesomeIcons.userPlus),
@@ -4509,17 +4793,14 @@ final groupData = await supabase
             .eq('judge_id', judge!.id)
             .inFilter('submission_id', submissionIds);
 
-    final signedUrls = await Future.wait(
-      submissions.map(
-        (s) => supabase.storage.from('Photos').createSignedUrl(s['photo_url'], 60 * 60),
-      ),
-    );
+    final signedUrls =
+        await createSignedUrlMap(submissions.map((s) => s['photo_url'] as String).toList());
 
     final result = <Map<String, dynamic>>[];
 
     for (var i = 0; i < submissions.length; i++) {
       final submission = submissions[i];
-      final signedUrl = signedUrls[i];
+      final signedUrl = signedUrls[submission['photo_url']];
 
       final existingScores = allJudgeScores
           .where((s) => s['submission_id'] == submission['id'])
@@ -4937,28 +5218,29 @@ class TodayPhotosPage extends StatelessWidget {
         .single();
     final anonymousJudging = groupData['anonymous_judging'] ?? false;
 
-    final submissions = await supabase
-        .from('submissions')
-        .select()
-        .eq('group_id', group['id'])
-        .gte('submitted_at', startOfDay.toIso8601String())
-        .lt('submitted_at', endOfDay.toIso8601String())
-        .order('submitted_at', ascending: false);
+    final fetched = await Future.wait<dynamic>([
+      supabase
+          .from('submissions')
+          .select()
+          .eq('group_id', group['id'])
+          .gte('submitted_at', startOfDay.toIso8601String())
+          .lt('submitted_at', endOfDay.toIso8601String())
+          .order('submitted_at', ascending: false),
+      supabase.from('users').select(),
+      supabase.from('scores').select(),
+    ]);
+    final submissions = fetched[0] as List;
+    final users = fetched[1] as List;
+    final scores = fetched[2] as List;
 
-    final users = await supabase.from('users').select();
-    final scores = await supabase.from('scores').select();
-
-    final signedUrls = await Future.wait(
-      submissions.map(
-        (s) => supabase.storage.from('Photos').createSignedUrl(s['photo_url'], 60 * 60),
-      ),
-    );
+    final signedUrls =
+        await createSignedUrlMap(submissions.map((s) => s['photo_url'] as String).toList());
 
     final result = <Map<String, dynamic>>[];
 
     for (var i = 0; i < submissions.length; i++) {
       final submission = submissions[i];
-      final signedUrl = signedUrls[i];
+      final signedUrl = signedUrls[submission['photo_url']];
 
       final uploader = users.firstWhere(
         (u) => u['id'] == submission['user_id'],
@@ -5107,6 +5389,7 @@ final submissions = await supabase
     final users = await supabase.from('users').select();
     final streaks = await fetchGroupStreaks(group['id']);
     final wins = await fetchGroupWinCounts(group['id']);
+    final lifetimeCoins = await fetchGroupLifetimeCoinsEarned(group['id']);
 
     final results = <Map<String, dynamic>>[];
 
@@ -5141,6 +5424,7 @@ final submissions = await supabase
         'total_score': totalScore,
         'streak': streaks[userId] ?? 0,
         'custom_title': member['custom_title'],
+        'coins_earned': lifetimeCoins[userId] ?? 0,
       });
     }
 
@@ -5242,10 +5526,19 @@ return ListView(
                   username: row['username'] ?? '?',
                   color: color,
                 ),
-          title: Text(
-            (row['custom_title'] as String?)?.isNotEmpty == true
-                ? '${row['username']} · "${row['custom_title']}"'
-                : row['username'],
+          title: Row(
+            children: [
+              RankBadge(coinsEarned: row['coins_earned'] as int? ?? 0, size: 16),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  (row['custom_title'] as String?)?.isNotEmpty == true
+                      ? '${row['username']} · "${row['custom_title']}"'
+                      : row['username'],
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
           ),
           subtitle: Text(
             [
@@ -5454,27 +5747,28 @@ Future<List<Map<String, dynamic>>> fetchBattlePhotos() async {
   final startDate = DateTime.parse(item['dateKey']);
   final endDate = startDate.add(const Duration(days: 1));
 
-  final submissions = await supabase
-      .from('submissions')
-      .select()
-      .eq('group_id', group['id'])
-      .gte('submitted_at', startDate.toIso8601String())
-      .lt('submitted_at', endDate.toIso8601String());
+  final fetched = await Future.wait<dynamic>([
+    supabase
+        .from('submissions')
+        .select()
+        .eq('group_id', group['id'])
+        .gte('submitted_at', startDate.toIso8601String())
+        .lt('submitted_at', endDate.toIso8601String()),
+    supabase.from('users').select(),
+    supabase.from('scores').select(),
+  ]);
+  final submissions = fetched[0] as List;
+  final users = fetched[1] as List;
+  final scores = fetched[2] as List;
 
-  final users = await supabase.from('users').select();
-  final scores = await supabase.from('scores').select();
-
-  final signedUrls = await Future.wait(
-    submissions.map(
-      (s) => supabase.storage.from('Photos').createSignedUrl(s['photo_url'], 60 * 60),
-    ),
-  );
+  final signedUrls =
+      await createSignedUrlMap(submissions.map((s) => s['photo_url'] as String).toList());
 
   final result = <Map<String, dynamic>>[];
 
   for (var i = 0; i < submissions.length; i++) {
     final submission = submissions[i];
-    final signedUrl = signedUrls[i];
+    final signedUrl = signedUrls[submission['photo_url']];
 
     final user = users.firstWhere(
       (u) => u['id'] == submission['user_id'],
@@ -6084,6 +6378,7 @@ DateTime _focusedDay = DateTime.now();
       final scores = await supabase.from('scores').select();
 
      final days = <String, Map<String, dynamic>>{};
+      final daySubmissions = <String, List<dynamic>>{};
 
       for (final submission in submissions) {
         final submittedAt = submission['submitted_at'];
@@ -6095,15 +6390,13 @@ DateTime _focusedDay = DateTime.now();
             'date': submittedAt,
             'totals': <String, int>{},
             'submittedUsers': <String>{},
-            'submittedTimes': <String, String>{},
           };
         });
+        daySubmissions.putIfAbsent(dateKey, () => []).add(submission);
 
         final totals = days[dateKey]!['totals'] as Map<String, int>;
         final submittedUsers = days[dateKey]!['submittedUsers'] as Set<String>;
-        final submittedTimes = days[dateKey]!['submittedTimes'] as Map<String, String>;
         submittedUsers.add(userId);
-        submittedTimes[userId] = submittedAt.toString();
 
         final submissionScores = scores.where(
           (score) => score['submission_id'] == submission['id'],
@@ -6114,39 +6407,29 @@ DateTime _focusedDay = DateTime.now();
         }
       }
 
+      final today = DateTime.now();
+      final startOfToday = DateTime(today.year, today.month, today.day);
+
      days.forEach((dateKey, day) {
         final totals = day['totals'] as Map<String, int>;
         final submittedUsers = day['submittedUsers'] as Set<String>;
-        final submittedTimes = day['submittedTimes'] as Map<String, String>;
 
         // Every player who submitted gets a row, even if not scored yet (shows 0).
         final displayTotals = <String, int>{
           for (final userId in submittedUsers) userId: totals[userId] ?? 0,
         };
 
-        String winnerName = 'No winner yet';
-        String? winnerId;
-
-        if (totals.isNotEmpty) {
-          final maxScore = totals.values.reduce((a, b) => a > b ? a : b);
-          final topUserIds = totals.entries
-              .where((e) => e.value == maxScore)
-              .map((e) => e.key)
-              .toList();
-
-          // Tie-break: earliest submission wins.
-          topUserIds.sort(
-            (a, b) => submittedTimes[a]!.compareTo(submittedTimes[b]!),
-          );
-          winnerId = topUserIds.first;
-          winnerName = _memberNames[winnerId] ?? 'Unknown';
-        }
+        final dayDate = DateTime.parse(dateKey);
+        final isPastDay = dayDate.isBefore(startOfToday);
+        final outcome = computeDayOutcome(daySubmissions[dateKey] ?? [], scores, isPastDay: isPastDay);
+        final winnerName =
+            outcome.winnerId != null ? (_memberNames[outcome.winnerId] ?? 'Unknown') : 'No winner yet';
 
         _dayItems[dateKey] = {
           'date': day['date'],
           'dateKey': dateKey,
           'winner': winnerName,
-          'winnerId': winnerId,
+          'winnerId': outcome.winnerId,
           'totals': displayTotals,
         };
       });
@@ -6673,6 +6956,7 @@ class _StorePageState extends State<StorePage> {
   bool _loading = true;
   bool _busy = false;
   int _balance = 0;
+  int _lifetimeEarned = 0;
   Map<String, dynamic>? _todaySubmission;
   String? _customTitle;
   bool _submittedYesterday = true;
@@ -6719,6 +7003,7 @@ class _StorePageState extends State<StorePage> {
           .gte('submitted_at', startOfYesterday.toIso8601String())
           .lt('submitted_at', startOfDay.toIso8601String())
           .maybeSingle(),
+      fetchLifetimeCoinsEarned(groupId, user.id),
     ]);
 
     if (!mounted) return;
@@ -6727,6 +7012,7 @@ class _StorePageState extends State<StorePage> {
       _todaySubmission = results[1] as Map<String, dynamic>?;
       _customTitle = (results[2] as Map<String, dynamic>?)?['custom_title'] as String?;
       _submittedYesterday = results[3] != null;
+      _lifetimeEarned = results[4] as int;
       _loading = false;
     });
   }
@@ -6850,6 +7136,76 @@ class _StorePageState extends State<StorePage> {
     });
   }
 
+  Future<void> _buyFreeze() async {
+    final user = supabase.auth.currentUser;
+    if (user == null) return;
+
+    final members = await supabase
+        .from('group_members')
+        .select()
+        .eq('group_id', widget.group['id'])
+        .inFilter('role', ['owner', 'player', 'judge']);
+
+    final competing = members
+        .where((m) =>
+            m['user_id'] != user.id &&
+            (m['role'] == 'player' ||
+                (m['role'] == 'owner' && (m['owner_is_judge'] != true || m['judge_also_plays'] == true)) ||
+                (m['role'] == 'judge' && m['judge_also_plays'] == true)))
+        .toList();
+
+    if (competing.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No rivals to freeze yet.')),
+      );
+      return;
+    }
+
+    final users = await supabase.from('users').select();
+    final usersById = {for (final u in users) u['id'] as String: u};
+
+    if (!mounted) return;
+    final targetId = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: kSurfaceColor,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Padding(
+              padding: EdgeInsets.all(16),
+              child: Text('Freeze who tomorrow?', style: TextStyle(fontWeight: FontWeight.bold)),
+            ),
+            for (final m in competing)
+              ListTile(
+                leading: _MemberAvatar(
+                  username: usersById[m['user_id']]?['username'] as String? ?? '?',
+                  color: kAccentTeal,
+                  size: 32,
+                ),
+                title: Text(usersById[m['user_id']]?['username'] as String? ?? 'Unknown'),
+                onTap: () => Navigator.pop(context, m['user_id'] as String),
+              ),
+          ],
+        ),
+      ),
+    );
+
+    if (targetId == null || !mounted) return;
+
+    await _purchase(kStoreItems.firstWhere((i) => i.key == 'freeze'), () async {
+      final tomorrow = DateTime.now().add(const Duration(days: 1));
+      final dateKey = _dateKeyForStreak(tomorrow);
+      await supabase.from('groups').update({
+        'frozen_user_id': targetId,
+        'frozen_date': dateKey,
+      }).eq('id', widget.group['id']);
+      widget.group['frozen_user_id'] = targetId;
+      widget.group['frozen_date'] = dateKey;
+    });
+  }
+
   Future<void> _buyAnonymousSubmission() async {
     final submission = _todaySubmission;
     if (submission == null) return;
@@ -6876,6 +7232,9 @@ class _StorePageState extends State<StorePage> {
       case 'anonymous_submission':
         _buyAnonymousSubmission();
         break;
+      case 'freeze':
+        _buyFreeze();
+        break;
     }
   }
 
@@ -6887,6 +7246,9 @@ class _StorePageState extends State<StorePage> {
     }
     if (item.key == 'streak_shield') {
       return !_submittedYesterday;
+    }
+    if (item.key == 'freeze') {
+      return widget.group['freeze_enabled'] == true;
     }
     return true;
   }
@@ -6900,6 +7262,9 @@ class _StorePageState extends State<StorePage> {
     }
     if (item.key == 'streak_shield' && _submittedYesterday) {
       return 'No missed day to cover';
+    }
+    if (item.key == 'freeze' && widget.group['freeze_enabled'] != true) {
+      return 'Owner has this off';
     }
     return null;
   }
@@ -6967,7 +7332,64 @@ class _StorePageState extends State<StorePage> {
                       ),
                     ),
                   ),
-                  const SizedBox(height: 20),
+                  const SizedBox(height: 12),
+                  Builder(builder: (context) {
+                    final tier = rankForCoins(_lifetimeEarned);
+                    final next = nextRankForCoins(_lifetimeEarned);
+                    final progress = next == null
+                        ? 1.0
+                        : (_lifetimeEarned - tier.minCoins) / (next.minCoins - tier.minCoins);
+
+                    return Card(
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(12),
+                        onTap: () => showRankDetailsSheet(context, _lifetimeEarned),
+                        child: Padding(
+                          padding: const EdgeInsets.all(16),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Text(tier.emoji, style: const TextStyle(fontSize: 22)),
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    tier.name,
+                                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: tier.color),
+                                  ),
+                                  const Spacer(),
+                                  Text(
+                                    '$_lifetimeEarned lifetime 🪙',
+                                    style: TextStyle(fontSize: 12, color: Colors.white.withOpacity(0.6)),
+                                  ),
+                                  const SizedBox(width: 4),
+                                  FaIcon(FontAwesomeIcons.chevronRight, size: 12, color: Colors.white.withOpacity(0.4)),
+                                ],
+                              ),
+                              const SizedBox(height: 10),
+                              ClipRRect(
+                                borderRadius: BorderRadius.circular(8),
+                                child: LinearProgressIndicator(
+                                  value: progress.clamp(0, 1),
+                                  minHeight: 8,
+                                  backgroundColor: Colors.white12,
+                                  valueColor: AlwaysStoppedAnimation(next?.color ?? tier.color),
+                                ),
+                              ),
+                              const SizedBox(height: 6),
+                              Text(
+                                next == null
+                                    ? 'Max rank reached! 🎉'
+                                    : '${next.minCoins - _lifetimeEarned} 🪙 to ${next.emoji} ${next.name} · tap for perks',
+                                style: TextStyle(fontSize: 12, color: Colors.white.withOpacity(0.6)),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    );
+                  }),
+                  const SizedBox(height: 12),
                   if (_customTitle != null && _customTitle!.isNotEmpty)
                     Padding(
                       padding: const EdgeInsets.only(bottom: 12),
@@ -7073,6 +7495,20 @@ class MiniGamesPage extends StatelessWidget {
                 onTap: () => Navigator.push(
                   context,
                   MaterialPageRoute(builder: (_) => BluffGamePage(group: group)),
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Card(
+              child: ListTile(
+                contentPadding: const EdgeInsets.all(16),
+                leading: const FaIcon(FontAwesomeIcons.shuffle, size: 28, color: Colors.pinkAccent),
+                title: const Text('Photo Roulette', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                subtitle: const Text('A random gallery photo per player — guess whose is whose.'),
+                trailing: const FaIcon(FontAwesomeIcons.chevronRight, size: 14),
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => PhotoRoulettePage(group: group)),
                 ),
               ),
             ),
@@ -7492,11 +7928,13 @@ class _BluffGamePageState extends State<BluffGamePage> {
       guessesByRound.putIfAbsent(g['round_id'] as String, () => []).add(g);
     }
 
-    final signedUrls = <String, String>{};
-    await Future.wait(rounds.map((r) async {
-      signedUrls[r['id'] as String] =
-          await supabase.storage.from('Photos').createSignedUrl(r['photo_url'], 60 * 60);
-    }));
+    final photoUrlToSigned =
+        await createSignedUrlMap(rounds.map((r) => r['photo_url'] as String).toList());
+    final signedUrls = <String, String>{
+      for (final r in rounds)
+        if (photoUrlToSigned[r['photo_url']] != null)
+          r['id'] as String: photoUrlToSigned[r['photo_url']]!,
+    };
 
     final toGuess = <Map<String, dynamic>>[];
     final mine = <Map<String, dynamic>>[];
@@ -7874,6 +8312,1381 @@ String _formatShortTime(DateTime t) {
   final minute = t.minute.toString().padLeft(2, '0');
   final ampm = t.hour >= 12 ? 'PM' : 'AM';
   return '$hour:$minute $ampm';
+}
+
+const Map<int, int> kPhotoRouletteStake = {1: 8, 3: 18, 5: 28};
+const Map<int, int> kPhotoRouletteGuessStake = {1: 3, 3: 6, 5: 10};
+const int kPhotoRouletteMaxRerolls = 2;
+
+Widget _assetThumb(AssetEntity asset, {double? width, double? height, BoxFit fit = BoxFit.cover}) {
+  return FutureBuilder<Uint8List?>(
+    future: asset.thumbnailDataWithSize(const ThumbnailSize(500, 500)),
+    builder: (context, snapshot) {
+      if (!snapshot.hasData) {
+        return Container(width: width, height: height, color: kSurfaceColor);
+      }
+      return Image.memory(snapshot.data!, width: width, height: height, fit: fit);
+    },
+  );
+}
+
+/// Lazily advances every open Photo Roulette round in a group one step:
+/// pending -> guessing (once every expected participant has submitted their
+/// full photo set) or pending -> cancelled (submission deadline passed with
+/// someone still missing, refunding whoever *did* finish and get charged);
+/// guessing -> resolved (once the guessing deadline passes, paying out both
+/// pots). Safe to call every time the hub page loads — same idempotent,
+/// call-it-and-forget pattern as [resolveBluffRounds] and coin settlement.
+Future<void> resolvePhotoRouletteRounds(String groupId) async {
+  final supabase = Supabase.instance.client;
+  try {
+    final nowUtc = DateTime.now().toUtc();
+
+    final rounds = await supabase
+        .from('photo_roulette_rounds')
+        .select()
+        .eq('group_id', groupId)
+        .inFilter('status', ['pending', 'guessing']);
+
+    for (final round in rounds) {
+      final roundId = round['id'] as String;
+      final status = round['status'] as String;
+      final photosPerParticipant = round['photos_per_participant'] as int;
+
+      Future<void> award(String userId, int amount, String reason) {
+        return supabase.from('coin_transactions').upsert(
+          {
+            'group_id': groupId,
+            'user_id': userId,
+            'amount': amount,
+            'reason': reason,
+            'reference_id': roundId,
+          },
+          onConflict: 'group_id,user_id,reason,reference_id',
+          ignoreDuplicates: true,
+        );
+      }
+
+      if (status == 'pending') {
+        final invites = await supabase
+            .from('photo_roulette_invites')
+            .select()
+            .eq('round_id', roundId);
+
+        final acceptedIds = invites
+            .where((i) => i['status'] == 'accepted')
+            .map((i) => i['invitee_id'] as String)
+            .toSet();
+        final expectedParticipants = {round['initiator_id'] as String, ...acceptedIds};
+
+        final photos = await supabase
+            .from('photo_roulette_photos')
+            .select('participant_id')
+            .eq('round_id', roundId);
+
+        final submittedCounts = <String, int>{};
+        for (final p in photos) {
+          final uid = p['participant_id'] as String;
+          submittedCounts[uid] = (submittedCounts[uid] ?? 0) + 1;
+        }
+
+        final allSubmitted = expectedParticipants.every(
+          (uid) => (submittedCounts[uid] ?? 0) >= photosPerParticipant,
+        );
+
+        if (allSubmitted) {
+          await supabase
+              .from('photo_roulette_rounds')
+              .update({
+                'status': 'guessing',
+                'guessing_deadline': nowUtc.add(const Duration(hours: 24)).toIso8601String(),
+              })
+              .eq('id', roundId)
+              .eq('status', 'pending');
+          continue;
+        }
+
+        final submissionDeadline = DateTime.parse(round['submission_deadline'] as String);
+        if (nowUtc.isAfter(submissionDeadline)) {
+          // Timed out with someone still missing — refund only whoever
+          // actually finished their full set (they're the only ones who were
+          // ever charged; a partial submitter was never billed).
+          for (final uid in submittedCounts.keys) {
+            if ((submittedCounts[uid] ?? 0) < photosPerParticipant) continue;
+            await award(uid, round['stake_per_participant'] as int, 'roulette_refund');
+          }
+          await supabase
+              .from('photo_roulette_rounds')
+              .update({'status': 'cancelled'})
+              .eq('id', roundId)
+              .eq('status', 'pending');
+        }
+        continue;
+      }
+
+      // status == 'guessing'
+      final guessingDeadlineRaw = round['guessing_deadline'] as String?;
+      if (guessingDeadlineRaw == null) continue;
+      if (!nowUtc.isAfter(DateTime.parse(guessingDeadlineRaw))) continue;
+
+      final photos = await supabase.from('photo_roulette_photos').select().eq('round_id', roundId);
+      final guessEntries =
+          await supabase.from('photo_roulette_guess_entries').select().eq('round_id', roundId);
+
+      // Pot A: guessers split a shared pot by their share of total correct
+      // matches across the whole group — partial credit, not all-or-nothing.
+      final correctCounts = <String, int>{};
+      var totalCorrect = 0;
+      for (final entry in guessEntries) {
+        final guesses = Map<String, dynamic>.from(entry['guesses'] as Map);
+        var correct = 0;
+        for (final photo in photos) {
+          if (guesses[photo['id']] == photo['participant_id']) correct++;
+        }
+        correctCounts[entry['guesser_id'] as String] = correct;
+        totalCorrect += correct;
+      }
+
+      final guesserPot = guessEntries.fold<int>(0, (sum, e) => sum + (e['stake'] as int));
+      if (guesserPot > 0) {
+        if (totalCorrect == 0) {
+          for (final entry in guessEntries) {
+            await award(entry['guesser_id'] as String, entry['stake'] as int, 'roulette_guess_refund');
+          }
+        } else {
+          for (final entry in guessEntries) {
+            final guesserId = entry['guesser_id'] as String;
+            final correct = correctCounts[guesserId] ?? 0;
+            if (correct == 0) continue;
+            final payout = (guesserPot * correct) ~/ totalCorrect;
+            if (payout > 0) await award(guesserId, payout, 'roulette_guess_payout');
+          }
+        }
+      }
+
+      // Pot B: participants split a shared pot by how many of their photos
+      // *nobody* correctly identified — a real "stayed hidden" reward.
+      final hiddenCounts = <String, int>{};
+      var totalHidden = 0;
+      final participantStakes = <String, int>{};
+
+      for (final photo in photos) {
+        final ownerId = photo['participant_id'] as String;
+        participantStakes[ownerId] = round['stake_per_participant'] as int;
+
+        final identified = guessEntries.any((entry) {
+          final guesses = Map<String, dynamic>.from(entry['guesses'] as Map);
+          return guesses[photo['id']] == ownerId;
+        });
+
+        if (!identified) {
+          hiddenCounts[ownerId] = (hiddenCounts[ownerId] ?? 0) + 1;
+          totalHidden++;
+        }
+      }
+
+      final participantPot = participantStakes.values.fold<int>(0, (sum, s) => sum + s);
+      if (totalHidden == 0) {
+        for (final entry in participantStakes.entries) {
+          await award(entry.key, entry.value, 'roulette_stake_refund');
+        }
+      } else {
+        for (final uid in participantStakes.keys) {
+          final hidden = hiddenCounts[uid] ?? 0;
+          if (hidden == 0) continue;
+          final payout = (participantPot * hidden) ~/ totalHidden;
+          if (payout > 0) await award(uid, payout, 'roulette_hidden_bonus');
+        }
+      }
+
+      await supabase
+          .from('photo_roulette_rounds')
+          .update({'status': 'resolved'})
+          .eq('id', roundId)
+          .eq('status', 'guessing');
+    }
+  } catch (e, st) {
+    FirebaseCrashlytics.instance.recordError(e, st, fatal: false);
+  }
+}
+
+class PhotoRoulettePage extends StatefulWidget {
+  final dynamic group;
+
+  const PhotoRoulettePage({super.key, required this.group});
+
+  @override
+  State<PhotoRoulettePage> createState() => _PhotoRoulettePageState();
+}
+
+class _PhotoRoulettePageState extends State<PhotoRoulettePage> {
+  final supabase = Supabase.instance.client;
+
+  bool _loading = true;
+  int _balance = 0;
+  Map<String, Map<String, dynamic>> _usersById = {};
+  List<Map<String, dynamic>> _myInvites = [];
+  List<Map<String, dynamic>> _toSubmit = [];
+  List<Map<String, dynamic>> _toGuess = [];
+  List<Map<String, dynamic>> _waiting = [];
+  List<Map<String, dynamic>> _resolved = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() => _loading = true);
+    final user = supabase.auth.currentUser;
+    if (user == null) return;
+    final groupId = widget.group['id'];
+
+    await resolvePhotoRouletteRounds(groupId);
+
+    final results = await Future.wait<dynamic>([
+      fetchCoinBalance(groupId, user.id),
+      supabase
+          .from('photo_roulette_rounds')
+          .select()
+          .eq('group_id', groupId)
+          .order('created_at', ascending: false),
+      supabase.from('users').select(),
+    ]);
+
+    final balance = results[0] as int;
+    final rounds = (results[1] as List).cast<Map<String, dynamic>>();
+    final users = (results[2] as List).cast<Map<String, dynamic>>();
+    final usersById = {for (final u in users) u['id'] as String: u};
+
+    final roundIds = rounds.map((r) => r['id']).toList();
+
+    final allInvites = roundIds.isEmpty
+        ? <dynamic>[]
+        : await supabase.from('photo_roulette_invites').select().inFilter('round_id', roundIds);
+    final allPhotoCounts = roundIds.isEmpty
+        ? <dynamic>[]
+        : await supabase
+            .from('photo_roulette_photos')
+            .select('round_id, participant_id')
+            .inFilter('round_id', roundIds);
+    final allGuessEntries = roundIds.isEmpty
+        ? <dynamic>[]
+        : await supabase
+            .from('photo_roulette_guess_entries')
+            .select('round_id, guesser_id')
+            .inFilter('round_id', roundIds);
+
+    final invitesByRound = <String, List<dynamic>>{};
+    for (final i in allInvites) {
+      invitesByRound.putIfAbsent(i['round_id'] as String, () => []).add(i);
+    }
+    final photoCountByRoundUser = <String, Map<String, int>>{};
+    for (final p in allPhotoCounts) {
+      final rid = p['round_id'] as String;
+      final uid = p['participant_id'] as String;
+      photoCountByRoundUser.putIfAbsent(rid, () => {});
+      photoCountByRoundUser[rid]![uid] = (photoCountByRoundUser[rid]![uid] ?? 0) + 1;
+    }
+    final guessedRoundUserSet = <String>{};
+    for (final g in allGuessEntries) {
+      guessedRoundUserSet.add('${g['round_id']}_${g['guesser_id']}');
+    }
+
+    final myInvites = <Map<String, dynamic>>[];
+    final toSubmit = <Map<String, dynamic>>[];
+    final toGuess = <Map<String, dynamic>>[];
+    final waiting = <Map<String, dynamic>>[];
+    final resolved = <Map<String, dynamic>>[];
+
+    for (final round in rounds) {
+      final roundId = round['id'] as String;
+      final status = round['status'] as String;
+      if (status == 'cancelled') continue;
+
+      final invites = invitesByRound[roundId] ?? [];
+      final myInvite = invites.where((i) => i['invitee_id'] == user.id).toList();
+      final isInitiator = round['initiator_id'] == user.id;
+      final myPhotoCount = photoCountByRoundUser[roundId]?[user.id] ?? 0;
+      final photosNeeded = round['photos_per_participant'] as int;
+      final didGuess = guessedRoundUserSet.contains('${roundId}_${user.id}');
+
+      if (status == 'resolved') {
+        final wasParticipant = isInitiator || myPhotoCount > 0;
+        if (wasParticipant || didGuess) resolved.add(round);
+        continue;
+      }
+
+      if (!isInitiator && myInvite.isNotEmpty && myInvite.first['status'] == 'pending') {
+        myInvites.add({...round, 'invite': myInvite.first});
+        continue;
+      }
+
+      final amExpectedParticipant =
+          isInitiator || (myInvite.isNotEmpty && myInvite.first['status'] == 'accepted');
+
+      if (status == 'pending' && amExpectedParticipant && myPhotoCount < photosNeeded) {
+        toSubmit.add(round);
+      } else if (status == 'guessing' && !didGuess) {
+        toGuess.add(round);
+      } else if (amExpectedParticipant || didGuess) {
+        waiting.add({...round, 'status': status});
+      }
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _balance = balance;
+      _usersById = usersById;
+      _myInvites = myInvites;
+      _toSubmit = toSubmit;
+      _toGuess = toGuess;
+      _waiting = waiting;
+      _resolved = resolved.take(5).toList();
+      _loading = false;
+    });
+  }
+
+  Future<void> _respondToInvite(String inviteId, bool accept) async {
+    try {
+      await supabase.from('photo_roulette_invites').update({
+        'status': accept ? 'accepted' : 'declined',
+        'responded_at': DateTime.now().toUtc().toIso8601String(),
+      }).eq('id', inviteId);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(friendlyError(e))));
+    }
+  }
+
+  Future<void> _startRoundFlow() async {
+    final members =
+        await supabase.from('group_members').select().eq('group_id', widget.group['id']);
+    final user = supabase.auth.currentUser;
+    final otherMembers = members.where((m) => m['user_id'] != user?.id).toList();
+
+    if (otherMembers.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No one else to invite yet.')),
+      );
+      return;
+    }
+
+    if (!mounted) return;
+    final result = await showModalBottomSheet<Map<String, dynamic>>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: kSurfaceColor,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) =>
+          _RouletteCreateSheet(members: otherMembers, usersById: _usersById),
+    );
+
+    if (result == null || !mounted) return;
+
+    try {
+      final size = result['size'] as int;
+      final inviteeIds = result['inviteeIds'] as List<String>;
+      final currentUser = supabase.auth.currentUser!;
+
+      final roundRow = await supabase
+          .from('photo_roulette_rounds')
+          .insert({
+            'group_id': widget.group['id'],
+            'initiator_id': currentUser.id,
+            'photos_per_participant': size,
+            'stake_per_participant': kPhotoRouletteStake[size],
+            'guess_stake': kPhotoRouletteGuessStake[size],
+            'submission_deadline':
+                DateTime.now().toUtc().add(const Duration(hours: 24)).toIso8601String(),
+          })
+          .select()
+          .single();
+
+      await supabase.from('photo_roulette_invites').insert([
+        for (final id in inviteeIds) {'round_id': roundRow['id'], 'invitee_id': id},
+      ]);
+
+      analytics.logEvent(name: 'roulette_round_started');
+
+      if (!mounted) return;
+      final submitted = await Navigator.push<bool>(
+        context,
+        MaterialPageRoute(
+          builder: (_) => _RouletteSubmitPage(group: widget.group, round: roundRow),
+        ),
+      );
+      if (submitted == true) await _load();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(friendlyError(e))));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final nothingToShow = _myInvites.isEmpty &&
+        _toSubmit.isEmpty &&
+        _toGuess.isEmpty &&
+        _waiting.isEmpty &&
+        _resolved.isEmpty;
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Photo Roulette')),
+      body: AppBackground(
+        group: widget.group,
+        child: _loading
+            ? const Center(child: CircularProgressIndicator())
+            : RefreshIndicator(
+                onRefresh: _load,
+                child: ListView(
+                  padding: EdgeInsets.fromLTRB(16, 16, 16, MediaQuery.of(context).padding.bottom + 16),
+                  children: [
+                    Card(
+                      color: kAccentGold.withOpacity(0.12),
+                      child: Padding(
+                        padding: const EdgeInsets.all(20),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            const FaIcon(FontAwesomeIcons.coins, color: kAccentGold, size: 28),
+                            const SizedBox(width: 10),
+                            _AnimatedCount(
+                              value: _balance,
+                              suffix: ' coins',
+                              style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
+                        onPressed: _startRoundFlow,
+                        icon: const FaIcon(FontAwesomeIcons.shuffle),
+                        label: const Text('Start a Round'),
+                      ),
+                    ),
+                    if (_myInvites.isNotEmpty) ...[
+                      const SizedBox(height: 20),
+                      const Text('Invites', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 8),
+                      ..._myInvites.map((round) {
+                        final initiatorName =
+                            _usersById[round['initiator_id']]?['username'] as String? ?? 'Someone';
+                        final size = round['photos_per_participant'] as int;
+                        return Card(
+                          child: Padding(
+                            padding: const EdgeInsets.all(14),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  '$initiatorName started a $size-photo round',
+                                  style: const TextStyle(fontWeight: FontWeight.bold),
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  'Costs ${round['stake_per_participant']}🪙 to join — win coins if your photos fool everyone.',
+                                  style: const TextStyle(fontSize: 12, color: Colors.white70),
+                                ),
+                                const SizedBox(height: 10),
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      child: OutlinedButton(
+                                        onPressed: () async {
+                                          await _respondToInvite(round['invite']['id'] as String, false);
+                                          await _load();
+                                        },
+                                        child: const Text('Decline'),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: ElevatedButton(
+                                        onPressed: () async {
+                                          await _respondToInvite(round['invite']['id'] as String, true);
+                                          if (!mounted) return;
+                                          final submitted = await Navigator.push<bool>(
+                                            context,
+                                            MaterialPageRoute(
+                                              builder: (_) =>
+                                                  _RouletteSubmitPage(group: widget.group, round: round),
+                                            ),
+                                          );
+                                          if (submitted == true) await _load();
+                                        },
+                                        child: const Text('Accept'),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ),
+                        );
+                      }),
+                    ],
+                    if (_toSubmit.isNotEmpty) ...[
+                      const SizedBox(height: 20),
+                      const Text('Your Turn to Submit', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 8),
+                      ..._toSubmit.map((round) => Card(
+                            child: ListTile(
+                              leading: const FaIcon(FontAwesomeIcons.shuffle, color: kAccentGold),
+                              title: Text('${round['photos_per_participant']}-photo round'),
+                              subtitle: const Text('Submit your random photos'),
+                              trailing: ElevatedButton(
+                                onPressed: () async {
+                                  final submitted = await Navigator.push<bool>(
+                                    context,
+                                    MaterialPageRoute(
+                                      builder: (_) =>
+                                          _RouletteSubmitPage(group: widget.group, round: round),
+                                    ),
+                                  );
+                                  if (submitted == true) await _load();
+                                },
+                                child: const Text('Go'),
+                              ),
+                            ),
+                          )),
+                    ],
+                    if (_toGuess.isNotEmpty) ...[
+                      const SizedBox(height: 20),
+                      const Text('Guess Now', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 8),
+                      ..._toGuess.map((round) => Card(
+                            child: ListTile(
+                              leading: const FaIcon(FontAwesomeIcons.magnifyingGlass, color: kAccentTeal),
+                              title: Text('${round['photos_per_participant']}-photo round'),
+                              subtitle: Text('${round['guess_stake']}🪙 to guess'),
+                              trailing: ElevatedButton(
+                                onPressed: () async {
+                                  final submitted = await Navigator.push<bool>(
+                                    context,
+                                    MaterialPageRoute(
+                                      builder: (_) =>
+                                          _RouletteGuessPage(group: widget.group, round: round),
+                                    ),
+                                  );
+                                  if (submitted == true) await _load();
+                                },
+                                child: const Text('Guess'),
+                              ),
+                            ),
+                          )),
+                    ],
+                    if (_waiting.isNotEmpty) ...[
+                      const SizedBox(height: 20),
+                      const Text('Waiting', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 8),
+                      ..._waiting.map((round) => Card(
+                            child: ListTile(
+                              leading: const FaIcon(FontAwesomeIcons.hourglassHalf, color: Colors.white54),
+                              title: Text('${round['photos_per_participant']}-photo round'),
+                              subtitle: Text(
+                                round['status'] == 'pending'
+                                    ? 'Waiting on other players to submit'
+                                    : 'Waiting on guesses to come in',
+                              ),
+                            ),
+                          )),
+                    ],
+                    if (_resolved.isNotEmpty) ...[
+                      const SizedBox(height: 20),
+                      const Text('Results', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 8),
+                      ..._resolved.map((round) => Card(
+                            child: ListTile(
+                              leading: const FaIcon(FontAwesomeIcons.trophy, color: kAccentGold),
+                              title: Text('${round['photos_per_participant']}-photo round'),
+                              subtitle: const Text('Tap to see who fooled who'),
+                              onTap: () => Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (_) => _RouletteResultsPage(group: widget.group, round: round),
+                                ),
+                              ),
+                            ),
+                          )),
+                    ],
+                    if (nothingToShow) ...[
+                      const SizedBox(height: 40),
+                      const _EmptyState(
+                        icon: FontAwesomeIcons.shuffle,
+                        title: 'No rounds yet',
+                        subtitle: 'Start one and see who you can fool with a random photo.',
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+      ),
+    );
+  }
+}
+
+class _RouletteCreateSheet extends StatefulWidget {
+  final List<dynamic> members;
+  final Map<String, Map<String, dynamic>> usersById;
+
+  const _RouletteCreateSheet({required this.members, required this.usersById});
+
+  @override
+  State<_RouletteCreateSheet> createState() => _RouletteCreateSheetState();
+}
+
+class _RouletteCreateSheetState extends State<_RouletteCreateSheet> {
+  int _size = 3;
+  final Set<String> _selected = {};
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.fromLTRB(20, 20, 20, MediaQuery.of(context).padding.bottom + 20),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('Start Photo Roulette', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 16),
+          const Text('Round size', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            children: [1, 3, 5].map((n) {
+              return ChoiceChip(
+                label: Text('$n photo${n == 1 ? '' : 's'} (${kPhotoRouletteStake[n]}🪙)'),
+                selected: _size == n,
+                onSelected: (_) => setState(() => _size = n),
+              );
+            }).toList(),
+          ),
+          const SizedBox(height: 16),
+          const Text('Invite', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+          const SizedBox(height: 8),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 240),
+            child: ListView(
+              shrinkWrap: true,
+              children: widget.members.map((m) {
+                final uid = m['user_id'] as String;
+                final username = widget.usersById[uid]?['username'] as String? ?? 'Unknown';
+                final isSelected = _selected.contains(uid);
+                return CheckboxListTile(
+                  value: isSelected,
+                  title: Text(username),
+                  onChanged: (v) => setState(() {
+                    if (v == true) {
+                      _selected.add(uid);
+                    } else {
+                      _selected.remove(uid);
+                    }
+                  }),
+                );
+              }).toList(),
+            ),
+          ),
+          const SizedBox(height: 16),
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton(
+              onPressed: _selected.isEmpty
+                  ? null
+                  : () => Navigator.pop(context, {'size': _size, 'inviteeIds': _selected.toList()}),
+              child: const Text('Send Invites'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _RouletteSubmitPage extends StatefulWidget {
+  final dynamic group;
+  final Map<String, dynamic> round;
+
+  const _RouletteSubmitPage({required this.group, required this.round});
+
+  @override
+  State<_RouletteSubmitPage> createState() => _RouletteSubmitPageState();
+}
+
+class _RouletteSubmitPageState extends State<_RouletteSubmitPage> {
+  final supabase = Supabase.instance.client;
+  late final int _photosNeeded;
+  final List<AssetEntity> _locked = [];
+  AssetEntity? _current;
+  int _rerollsUsed = 0;
+  bool _loadingAsset = false;
+  bool _submitting = false;
+  String? _permissionError;
+
+  @override
+  void initState() {
+    super.initState();
+    _photosNeeded = widget.round['photos_per_participant'] as int;
+    _startSlot();
+  }
+
+  Future<void> _startSlot() async {
+    setState(() {
+      _current = null;
+      _rerollsUsed = 0;
+      _permissionError = null;
+      _loadingAsset = true;
+    });
+
+    try {
+      final permission = await PhotoManager.requestPermissionExtend();
+      if (!permission.isAuth && !permission.hasAccess) {
+        if (!mounted) return;
+        setState(() {
+          _loadingAsset = false;
+          _permissionError = 'Gallery access is needed to play Photo Roulette.';
+        });
+        return;
+      }
+    } catch (e) {
+      // A failure here (e.g. the gallery plugin not yet registered after a
+      // hot-restart instead of a full app relaunch) must never leave the
+      // spinner stuck forever — surface it with a retry instead.
+      if (!mounted) return;
+      setState(() {
+        _loadingAsset = false;
+        _permissionError = friendlyError(e);
+      });
+      return;
+    }
+
+    await _pickRandomAsset();
+  }
+
+  Future<void> _pickRandomAsset() async {
+    setState(() => _loadingAsset = true);
+    try {
+      final albums = await PhotoManager.getAssetPathList(onlyAll: true, type: RequestType.image);
+      if (albums.isEmpty) {
+        if (!mounted) return;
+        setState(() {
+          _loadingAsset = false;
+          _permissionError = 'No photos found in your gallery.';
+        });
+        return;
+      }
+
+      final album = albums.first;
+      final count = await album.assetCountAsync;
+      if (count == 0) {
+        if (!mounted) return;
+        setState(() {
+          _loadingAsset = false;
+          _permissionError = 'No photos found in your gallery.';
+        });
+        return;
+      }
+
+      final excludedIds = _locked.map((a) => a.id).toSet();
+      AssetEntity? picked;
+      for (var attempt = 0; attempt < 10; attempt++) {
+        final index = Random().nextInt(count);
+        final page = await album.getAssetListRange(start: index, end: index + 1);
+        if (page.isEmpty) continue;
+        if (excludedIds.contains(page.first.id)) continue;
+        picked = page.first;
+        break;
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _current = picked;
+        _loadingAsset = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loadingAsset = false;
+        _permissionError = friendlyError(e);
+      });
+    }
+  }
+
+  void _reroll() {
+    if (_rerollsUsed >= kPhotoRouletteMaxRerolls) return;
+    setState(() => _rerollsUsed++);
+    _pickRandomAsset();
+  }
+
+  void _useThis() {
+    if (_current == null) return;
+    setState(() => _locked.add(_current!));
+    if (_locked.length < _photosNeeded) {
+      _startSlot();
+    }
+  }
+
+  Future<void> _confirmSubmit() async {
+    final user = supabase.auth.currentUser;
+    if (user == null || _submitting) return;
+
+    setState(() => _submitting = true);
+    try {
+      final stake = widget.round['stake_per_participant'] as int;
+      final freshBalance = await fetchCoinBalance(widget.group['id'], user.id);
+      if (freshBalance < stake) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Not enough coins')),
+        );
+        setState(() => _submitting = false);
+        return;
+      }
+
+      final roundId = widget.round['id'] as String;
+      final rows = <Map<String, dynamic>>[];
+
+      for (var i = 0; i < _locked.length; i++) {
+        final bytes = await _locked[i].originBytes;
+        if (bytes == null) continue;
+        final path = 'roulette_photos/$roundId/${user.id}/$i.jpg';
+        await supabase.storage.from('Photos').uploadBinary(
+              path,
+              bytes,
+              fileOptions: const FileOptions(upsert: true, contentType: 'image/jpeg'),
+            );
+        rows.add({
+          'round_id': roundId,
+          'participant_id': user.id,
+          'photo_url': path,
+          'slot_index': i,
+        });
+      }
+
+      await supabase.from('photo_roulette_photos').insert(rows);
+
+      await supabase.from('coin_transactions').insert({
+        'group_id': widget.group['id'],
+        'user_id': user.id,
+        'amount': -stake,
+        'reason': 'stake:roulette_submit',
+      });
+
+      analytics.logEvent(name: 'roulette_photos_submitted');
+      HapticFeedback.mediumImpact();
+      playFeedbackSound();
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Photos submitted! Waiting on other players.')),
+      );
+      Navigator.pop(context, true);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(friendlyError(e))));
+      setState(() => _submitting = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final allLocked = _locked.length >= _photosNeeded;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(allLocked ? 'Review Photos' : 'Photo ${_locked.length + 1} of $_photosNeeded'),
+      ),
+      body: AppBackground(
+        group: widget.group,
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: allLocked ? _buildReview() : _buildPicker(),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPicker() {
+    if (_permissionError != null) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const FaIcon(FontAwesomeIcons.triangleExclamation, size: 40, color: Colors.redAccent),
+            const SizedBox(height: 12),
+            Text(_permissionError!, textAlign: TextAlign.center),
+            const SizedBox(height: 16),
+            ElevatedButton(onPressed: _startSlot, child: const Text('Try Again')),
+          ],
+        ),
+      );
+    }
+
+    if (_loadingAsset || _current == null) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    return Column(
+      children: [
+        const Text(
+          'Random photo pulled from your gallery. Take a look before it\'s locked in.',
+          textAlign: TextAlign.center,
+          style: TextStyle(color: Colors.white70),
+        ),
+        const SizedBox(height: 20),
+        Expanded(
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(16),
+            child: _assetThumb(_current!, width: double.infinity, height: double.infinity),
+          ),
+        ),
+        const SizedBox(height: 20),
+        Row(
+          children: [
+            Expanded(
+              child: OutlinedButton(
+                onPressed: _rerollsUsed >= kPhotoRouletteMaxRerolls ? null : _reroll,
+                child: Text('Reroll (${kPhotoRouletteMaxRerolls - _rerollsUsed} left)'),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: ElevatedButton(
+                onPressed: _useThis,
+                child: const Text('Use This'),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildReview() {
+    return Column(
+      children: [
+        const Text('Your photos', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+        const SizedBox(height: 12),
+        Expanded(
+          child: GridView.builder(
+            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: 3,
+              crossAxisSpacing: 8,
+              mainAxisSpacing: 8,
+            ),
+            itemCount: _locked.length,
+            itemBuilder: (context, index) => ClipRRect(
+              borderRadius: BorderRadius.circular(10),
+              child: _assetThumb(_locked[index]),
+            ),
+          ),
+        ),
+        const SizedBox(height: 16),
+        SizedBox(
+          width: double.infinity,
+          child: ElevatedButton(
+            onPressed: _submitting ? null : _confirmSubmit,
+            child: Text(
+              _submitting
+                  ? 'Submitting...'
+                  : 'Confirm & Submit (${widget.round['stake_per_participant']}🪙)',
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _RouletteGuessPage extends StatefulWidget {
+  final dynamic group;
+  final Map<String, dynamic> round;
+
+  const _RouletteGuessPage({required this.group, required this.round});
+
+  @override
+  State<_RouletteGuessPage> createState() => _RouletteGuessPageState();
+}
+
+class _RouletteGuessPageState extends State<_RouletteGuessPage> {
+  final supabase = Supabase.instance.client;
+  bool _loading = true;
+  bool _submitting = false;
+  List<Map<String, dynamic>> _photos = [];
+  Map<String, Map<String, dynamic>> _usersById = {};
+  List<Map<String, dynamic>> _participants = [];
+  final Map<String, String> _guesses = {};
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() => _loading = true);
+    final user = supabase.auth.currentUser;
+    if (user == null) return;
+    final roundId = widget.round['id'] as String;
+
+    final fetched = await Future.wait<dynamic>([
+      supabase.from('photo_roulette_photos').select().eq('round_id', roundId),
+      supabase.from('users').select(),
+    ]);
+    final photos = (fetched[0] as List).cast<Map<String, dynamic>>();
+    final users = (fetched[1] as List).cast<Map<String, dynamic>>();
+    final usersById = {for (final u in users) u['id'] as String: u};
+
+    final photoUrlToSigned =
+        await createSignedUrlMap(photos.map((p) => p['photo_url'] as String).toList());
+    final signedUrls = <String, String>{
+      for (final p in photos)
+        if (photoUrlToSigned[p['photo_url']] != null)
+          p['id'] as String: photoUrlToSigned[p['photo_url']]!,
+    };
+
+    final photosList = photos
+        .where((p) => p['participant_id'] != user.id)
+        .map((p) => {...p, 'signed_url': signedUrls[p['id']]})
+        .toList()
+      ..shuffle();
+
+    final participantIds = photos.map((p) => p['participant_id'] as String).toSet().toList();
+    final participants =
+        participantIds.map((id) => usersById[id] ?? {'id': id, 'username': 'Unknown'}).toList();
+
+    if (!mounted) return;
+    setState(() {
+      _photos = photosList;
+      _usersById = usersById;
+      _participants = participants;
+      _loading = false;
+    });
+  }
+
+  Future<void> _assign(String photoId) async {
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: kSurfaceColor,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Padding(
+              padding: EdgeInsets.all(16),
+              child: Text('Who does this belong to?', style: TextStyle(fontWeight: FontWeight.bold)),
+            ),
+            for (final p in _participants)
+              ListTile(
+                leading: _MemberAvatar(username: p['username'] as String? ?? '?', color: kAccentGold, size: 32),
+                title: Text(p['username'] as String? ?? 'Unknown'),
+                onTap: () => Navigator.pop(context, p['id'] as String),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (choice == null) return;
+    setState(() => _guesses[photoId] = choice);
+  }
+
+  Future<void> _submitGuesses() async {
+    final user = supabase.auth.currentUser;
+    if (user == null || _submitting) return;
+
+    setState(() => _submitting = true);
+    try {
+      final stake = widget.round['guess_stake'] as int;
+      final freshBalance = await fetchCoinBalance(widget.group['id'], user.id);
+      if (freshBalance < stake) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Not enough coins')),
+        );
+        setState(() => _submitting = false);
+        return;
+      }
+
+      await supabase.from('photo_roulette_guess_entries').insert({
+        'round_id': widget.round['id'],
+        'guesser_id': user.id,
+        'guesses': _guesses,
+        'stake': stake,
+      });
+
+      await supabase.from('coin_transactions').insert({
+        'group_id': widget.group['id'],
+        'user_id': user.id,
+        'amount': -stake,
+        'reason': 'stake:roulette_guess',
+      });
+
+      analytics.logEvent(name: 'roulette_guesses_submitted');
+      HapticFeedback.mediumImpact();
+      playFeedbackSound();
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Guesses locked in!')),
+      );
+      Navigator.pop(context, true);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(friendlyError(e))));
+      setState(() => _submitting = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final allGuessed = _photos.isNotEmpty && _photos.every((p) => _guesses.containsKey(p['id']));
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Whose Photo?')),
+      body: AppBackground(
+        group: widget.group,
+        child: _loading
+            ? const Center(child: CircularProgressIndicator())
+            : Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  children: [
+                    const Text(
+                      'Match each photo to who you think took it.',
+                      style: TextStyle(color: Colors.white70),
+                    ),
+                    const SizedBox(height: 12),
+                    Expanded(
+                      child: GridView.builder(
+                        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                          crossAxisCount: 2,
+                          crossAxisSpacing: 10,
+                          mainAxisSpacing: 10,
+                          childAspectRatio: 0.85,
+                        ),
+                        itemCount: _photos.length,
+                        itemBuilder: (context, index) {
+                          final photo = _photos[index];
+                          final photoId = photo['id'] as String;
+                          final guessedId = _guesses[photoId];
+                          final guessedName =
+                              guessedId == null ? null : _usersById[guessedId]?['username'] as String?;
+
+                          return GestureDetector(
+                            onTap: () => _assign(photoId),
+                            child: Column(
+                              children: [
+                                Expanded(
+                                  child: ClipRRect(
+                                    borderRadius: BorderRadius.circular(12),
+                                    child: CachedNetworkImage(
+                                      imageUrl: photo['signed_url'] as String,
+                                      fit: BoxFit.cover,
+                                      width: double.infinity,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(height: 6),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                  decoration: BoxDecoration(
+                                    color: guessedName == null ? Colors.white10 : kAccentGold.withOpacity(0.2),
+                                    borderRadius: BorderRadius.circular(20),
+                                  ),
+                                  child: Text(
+                                    guessedName ?? 'Tap to guess',
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: guessedName == null ? Colors.white54 : kAccentGold,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton(
+                        onPressed: (allGuessed && !_submitting) ? _submitGuesses : null,
+                        child: Text(
+                          _submitting
+                              ? 'Submitting...'
+                              : 'Submit Guesses (${widget.round['guess_stake']}🪙)',
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+      ),
+    );
+  }
+}
+
+class _RouletteResultsPage extends StatefulWidget {
+  final dynamic group;
+  final Map<String, dynamic> round;
+
+  const _RouletteResultsPage({required this.group, required this.round});
+
+  @override
+  State<_RouletteResultsPage> createState() => _RouletteResultsPageState();
+}
+
+class _RouletteResultsPageState extends State<_RouletteResultsPage> {
+  final supabase = Supabase.instance.client;
+  bool _loading = true;
+  List<Map<String, dynamic>> _photos = [];
+  Map<String, Map<String, dynamic>> _usersById = {};
+  Map<String, dynamic>? _myGuesses;
+  int _myPayout = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() => _loading = true);
+    final user = supabase.auth.currentUser;
+    if (user == null) return;
+    final roundId = widget.round['id'] as String;
+
+    final results = await Future.wait<dynamic>([
+      supabase.from('photo_roulette_photos').select().eq('round_id', roundId),
+      supabase.from('users').select(),
+      supabase
+          .from('photo_roulette_guess_entries')
+          .select()
+          .eq('round_id', roundId)
+          .eq('guesser_id', user.id)
+          .maybeSingle(),
+      supabase
+          .from('coin_transactions')
+          .select('amount')
+          .eq('group_id', widget.group['id'])
+          .eq('user_id', user.id)
+          .eq('reference_id', roundId),
+    ]);
+
+    final photos = (results[0] as List).cast<Map<String, dynamic>>();
+    final users = (results[1] as List).cast<Map<String, dynamic>>();
+    final usersById = {for (final u in users) u['id'] as String: u};
+    final myEntry = results[2] as Map<String, dynamic>?;
+    final myTxs = (results[3] as List).cast<Map<String, dynamic>>();
+
+    final photoUrlToSigned =
+        await createSignedUrlMap(photos.map((p) => p['photo_url'] as String).toList());
+    final signedUrls = <String, String>{
+      for (final p in photos)
+        if (photoUrlToSigned[p['photo_url']] != null)
+          p['id'] as String: photoUrlToSigned[p['photo_url']]!,
+    };
+
+    final enrichedPhotos = photos.map((p) => {...p, 'signed_url': signedUrls[p['id']]}).toList();
+    final myPayout = myTxs.fold<int>(0, (sum, t) => sum + (t['amount'] as int));
+
+    if (!mounted) return;
+    setState(() {
+      _photos = enrichedPhotos;
+      _usersById = usersById;
+      _myGuesses = myEntry == null ? null : Map<String, dynamic>.from(myEntry['guesses'] as Map);
+      _myPayout = myPayout;
+      _loading = false;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Roulette Results')),
+      body: AppBackground(
+        group: widget.group,
+        child: _loading
+            ? const Center(child: CircularProgressIndicator())
+            : ListView(
+                padding: EdgeInsets.fromLTRB(16, 16, 16, MediaQuery.of(context).padding.bottom + 16),
+                children: [
+                  Card(
+                    color: _myPayout > 0 ? kAccentGold.withOpacity(0.12) : null,
+                    child: Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Text(
+                        _myPayout > 0 ? 'You earned +$_myPayout 🪙 this round!' : 'No coins won this round.',
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: _myPayout > 0 ? kAccentGold : Colors.white70,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  GridView.builder(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: 2,
+                      crossAxisSpacing: 10,
+                      mainAxisSpacing: 10,
+                      childAspectRatio: 0.8,
+                    ),
+                    itemCount: _photos.length,
+                    itemBuilder: (context, index) {
+                      final photo = _photos[index];
+                      final photoId = photo['id'] as String;
+                      final ownerId = photo['participant_id'] as String;
+                      final ownerName = _usersById[ownerId]?['username'] as String? ?? 'Unknown';
+                      final myGuessId = _myGuesses?[photoId] as String?;
+                      final iGuessedThis = myGuessId != null;
+                      final wasCorrect = myGuessId == ownerId;
+
+                      return Column(
+                        children: [
+                          Expanded(
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(12),
+                              child: Stack(
+                                fit: StackFit.expand,
+                                children: [
+                                  CachedNetworkImage(imageUrl: photo['signed_url'] as String, fit: BoxFit.cover),
+                                  if (iGuessedThis)
+                                    Positioned(
+                                      top: 6,
+                                      right: 6,
+                                      child: FaIcon(
+                                        wasCorrect ? FontAwesomeIcons.circleCheck : FontAwesomeIcons.circleXmark,
+                                        color: wasCorrect ? Colors.greenAccent : Colors.redAccent,
+                                        size: 20,
+                                      ),
+                                    ),
+                                ],
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(ownerName, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                        ],
+                      );
+                    },
+                  ),
+                ],
+              ),
+      ),
+    );
+  }
 }
 
 class SettingsPage extends StatefulWidget {
@@ -8917,9 +10730,20 @@ class _RulesPageState extends State<RulesPage> {
   // Ordered most-specific-first, since a line like "No filters or edited
   // photos" would otherwise always fall through to the generic camera icon
   // just because it mentions "photos" too.
+  // Ordered most-specific-first: broad buckets like "photo" match almost any
+  // rule, so they sit near the bottom as a catch-all — otherwise they'd
+  // steal matches from more specific rules (e.g. "the photo will be scored
+  // by the judges" is really about judging, not photos) and everything ends
+  // up with the same generic icon.
   String _guessIcon(String text) {
     final lower = text.toLowerCase();
 
+    if (lower.contains('ai-generated') ||
+        lower.contains('ai-edited') ||
+        lower.contains('manipulated') ||
+        lower.contains('deepfake')) {
+      return '🤖';
+    }
     if (lower.contains('filter') || lower.contains('edit') || lower.contains('photoshop')) {
       return '🖼️';
     }
@@ -8942,8 +10766,20 @@ class _RulesPageState extends State<RulesPage> {
     if (lower.contains('anonymous') || lower.contains('secret') || lower.contains('hidden')) {
       return '🎭';
     }
-    if (lower.contains('disqualif') || lower.contains('cheat') || lower.contains('fake')) {
+    if (lower.contains('forfeit') || lower.contains('opponent')) {
+      return '🏳️';
+    }
+    if (lower.contains('disqualif') || lower.contains('cheat')) {
       return '🛡️';
+    }
+    if (lower.contains('staged') || lower.contains('one-time') || lower.contains('one time')) {
+      return '🎬';
+    }
+    if (lower.contains('authentic') ||
+        lower.contains('proof') ||
+        lower.contains('doubt') ||
+        lower.contains('verify')) {
+      return '🔍';
     }
     if (lower.contains('warn') || lower.contains('penalty') || lower.contains('strike')) {
       return '⚠️';
@@ -8960,20 +10796,23 @@ class _RulesPageState extends State<RulesPage> {
         lower.contains('sportsmanship')) {
       return '🤝';
     }
+    if (lower.contains('tie,') ||
+        lower.contains('tie.') ||
+        lower.contains('tie ') ||
+        lower.contains('tiebreak') ||
+        lower.contains('draw')) {
+      return '🎲';
+    }
     if (lower.contains('daily') ||
         lower.contains('every day') ||
         lower.contains('each day') ||
+        lower.contains('same day') ||
         lower.contains('schedule')) {
       return '📅';
     }
-    if (lower.contains('photo') ||
-        lower.contains('camera') ||
-        lower.contains('picture') ||
-        lower.contains('upload') ||
-        lower.contains('submit')) {
-      return '📸';
-    }
-    if (lower.contains('time') ||
+    if (lower.contains('runs from') ||
+        lower.contains('00:') ||
+        lower.contains('time') ||
         lower.contains('late') ||
         lower.contains('deadline') ||
         lower.contains('midnight') ||
@@ -8994,6 +10833,16 @@ class _RulesPageState extends State<RulesPage> {
         lower.contains('champion') ||
         lower.contains('trophy')) {
       return '🏆';
+    }
+    if (lower.contains('fake')) {
+      return '🛡️';
+    }
+    if (lower.contains('photo') ||
+        lower.contains('camera') ||
+        lower.contains('picture') ||
+        lower.contains('upload') ||
+        lower.contains('submit')) {
+      return '📸';
     }
     if (lower.contains('no ') ||
         lower.contains("not allowed") ||
