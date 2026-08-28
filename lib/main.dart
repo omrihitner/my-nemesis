@@ -2,7 +2,6 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:ui';
 import 'package:image_picker/image_picker.dart';
-import 'package:photo_manager/photo_manager.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -23,6 +22,51 @@ import 'package:confetti/confetti.dart';
 import 'package:in_app_review/in_app_review.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:app_links/app_links.dart';
+
+/// Lets code outside the widget tree (the invite-link handler in main(),
+/// which can fire before any page exists) push routes once the app is ready.
+final navigatorKey = GlobalKey<NavigatorState>();
+
+/// An invite code from a link that arrived before we could act on it — e.g.
+/// the app was closed and not yet logged in. HomePage checks this once it's
+/// up and clears it after handling.
+String? pendingInviteCode;
+
+/// Kicked off by SplashScreen while the intro video is still playing, so the
+/// network round trip for the group list overlaps the animation instead of
+/// only starting once it's already visible. HomePage's first load consumes
+/// this (see `_HomePageState.initState`); every refresh after that calls
+/// [fetchUserGroups] fresh.
+Future<List<dynamic>>? preloadedGroupsFuture;
+
+Future<List<dynamic>> fetchUserGroups() async {
+  final supabase = Supabase.instance.client;
+  final user = supabase.auth.currentUser;
+
+  if (user == null) {
+    return [];
+  }
+
+  final memberships = await supabase
+      .from('group_members')
+      .select('group_id')
+      .eq('user_id', user.id);
+
+  final groupIds = memberships.map((m) => m['group_id']).toList();
+
+  if (groupIds.isEmpty) {
+    return [];
+  }
+
+  final groups = await supabase
+      .from('groups')
+      .select()
+      .inFilter('id', groupIds)
+      .order('created_at', ascending: false);
+
+  return groups;
+}
 
 const supabaseUrl = 'https://pwlidahqnfczjgqikzzy.supabase.co';
 const supabaseAnonKey = 'sb_publishable_xDxJd7g0SvwMtQ9L-1BATQ__ql0v8Ay';
@@ -31,6 +75,12 @@ const kBgColor = Color(0xFF15131B);
 const kSurfaceColor = Color(0xFF1E1A24);
 const kAccentGold = Color(0xFFF3A93B);
 const kAccentTeal = Color(0xFF4FD1C2);
+
+/// Modern phone cameras shoot well past what any in-app display ever needs
+/// (cards, carousels, thumbnails) — capping the long edge here keeps upload
+/// and later download/display fast for everyone, on top of imageQuality's
+/// JPEG compression which alone doesn't touch pixel dimensions.
+const double kPhotoMaxDimension = 1600;
 
 class StatOption {
   final String key;
@@ -56,6 +106,7 @@ class StoreItemDef {
   final String name;
   final int cost;
   final String description;
+  final String howToUse;
   final FaIconData icon;
   final bool comingSoon;
 
@@ -64,6 +115,7 @@ class StoreItemDef {
     required this.name,
     required this.cost,
     required this.description,
+    required this.howToUse,
     required this.icon,
     this.comingSoon = false,
   });
@@ -75,6 +127,8 @@ const kStoreItems = [
     name: 'Custom Title',
     cost: 20,
     description: 'Unlock a cosmetic badge next to your name.',
+    howToUse: 'Buy anytime — you\'ll be asked to type the title right there, and it shows up '
+        'next to your name everywhere in the group immediately. No other steps.',
     icon: FontAwesomeIcons.tag,
   ),
   StoreItemDef(
@@ -82,6 +136,9 @@ const kStoreItems = [
     name: 'Score Insurance',
     cost: 12,
     description: 'Add a visible +1 to today\'s score (once you\'ve submitted).',
+    howToUse: 'Only buyable after you\'ve submitted today\'s photo. The +1 is added to that '
+        'submission\'s score the instant you buy — good for a day you\'re worried judges '
+        'will be harsh, or you just want a safety net.',
     icon: FontAwesomeIcons.shieldHalved,
   ),
   StoreItemDef(
@@ -89,6 +146,8 @@ const kStoreItems = [
     name: 'Streak Shield',
     cost: 15,
     description: 'Forgive one missed day without breaking your streak.',
+    howToUse: 'Only buyable if you missed yesterday. Buying it patches that exact gap right '
+        'away, so today\'s submission keeps your streak going instead of starting over at 1.',
     icon: FontAwesomeIcons.fire,
   ),
   StoreItemDef(
@@ -96,6 +155,9 @@ const kStoreItems = [
     name: 'Dare Card',
     cost: 25,
     description: 'Force tomorrow to be a themed Challenge Day for the group.',
+    howToUse: 'Buy it any day, before or after you\'ve submitted. It picks a random themed '
+        'prompt (e.g. "something orange") and locks it in for the whole group starting '
+        'tomorrow — everyone will see the challenge prompt when they open the app.',
     icon: FontAwesomeIcons.diceD6,
   ),
   StoreItemDef(
@@ -103,6 +165,9 @@ const kStoreItems = [
     name: 'Anonymous Submission',
     cost: 10,
     description: 'Hide your name on today\'s submission (once you\'ve submitted).',
+    howToUse: 'Only buyable after you\'ve submitted today\'s photo. Your name is hidden on '
+        'that submission the instant you buy it — judges (and anyone browsing today\'s '
+        'photos) see it unnamed, just like this group\'s anonymous-judging mode.',
     icon: FontAwesomeIcons.userSecret,
   ),
   StoreItemDef(
@@ -110,6 +175,9 @@ const kStoreItems = [
     name: 'Freeze',
     cost: 30,
     description: 'Force a rival to skip tomorrow — they can\'t upload until the day after.',
+    howToUse: 'Only available if the group owner has turned Freeze on in Settings. Buying it '
+        'opens a picker to choose which rival to freeze — they\'re locked out of submitting '
+        'starting tomorrow, and can play again the day after.',
     icon: FontAwesomeIcons.snowflake,
   ),
 ];
@@ -616,6 +684,52 @@ Future<void> sendNotification({
     );
   } catch (_) {}
 }
+
+/// Saves the current FCM token for whoever's logged in. This used to only
+/// run once, at the moment of a fresh login — meaning a token that rotated
+/// afterward (Firebase does this periodically, and definitely on a reinstall)
+/// left the stored token permanently stale with no recovery path, silently
+/// breaking notifications for that device. Now called on every app startup
+/// for an already-logged-in session, and again any time Firebase actually
+/// issues a new token — see the two call sites in main().
+Future<void> registerFcmToken() async {
+  try {
+    final user = Supabase.instance.client.auth.currentUser;
+    if (user == null) return;
+    final token = await FirebaseMessaging.instance.getToken();
+    if (token == null) return;
+    await Supabase.instance.client.from('users').update({'fcm_token': token}).eq('id', user.id);
+  } catch (_) {}
+}
+
+/// Parses a `mynemesis://join?code=XXXX` link (opened from a share, e.g. one
+/// tapped in WhatsApp) and either jumps straight to the join flow if the app
+/// and a logged-in session are already up, or stashes the code in
+/// [pendingInviteCode] for HomePage to pick up right after startup/login.
+void _handleInviteUri(Uri uri) {
+  if (uri.host != 'join') return;
+  final code = uri.queryParameters['code'];
+  if (code == null || code.isEmpty) return;
+
+  final loggedIn = Supabase.instance.client.auth.currentUser != null;
+  final nav = navigatorKey.currentState;
+  if (loggedIn && nav != null) {
+    nav.push(MaterialPageRoute(builder: (_) => JoinGroupPage(initialCode: code)));
+  } else {
+    pendingInviteCode = code;
+  }
+}
+
+/// Wires [_handleInviteUri] up for both a cold start (app launched directly
+/// from the link) and a link tapped while the app is already running.
+void _initInviteLinkListener() {
+  final appLinks = AppLinks();
+  appLinks.getInitialLink().then((uri) {
+    if (uri != null) _handleInviteUri(uri);
+  }).catchError((_) {});
+  appLinks.uriLinkStream.listen(_handleInviteUri, onError: (_) {});
+}
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
@@ -657,6 +771,14 @@ Future<void> main() async {
     anonKey: supabaseAnonKey,
   );
 
+  // Re-register on every launch (covers a token that rotated since last
+  // login, e.g. after a reinstall) and again whenever Firebase issues a
+  // fresh token while the app is running.
+  registerFcmToken();
+  FirebaseMessaging.instance.onTokenRefresh.listen((_) => registerFcmToken());
+
+  _initInviteLinkListener();
+
   runApp(const MyNemesisApp());
 }
 
@@ -666,6 +788,7 @@ class MyNemesisApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      navigatorKey: navigatorKey,
       title: 'My Nemesis',
       debugShowCheckedModeBanner: false,
       scrollBehavior: const MaterialScrollBehavior(),
@@ -804,18 +927,7 @@ class _LoginPageState extends State<LoginPage> {
 
       if (!mounted) return;
 
-      try {
-        final fcmToken = await FirebaseMessaging.instance.getToken();
-        if (fcmToken != null) {
-          final userId = Supabase.instance.client.auth.currentUser?.id;
-          if (userId != null) {
-            await Supabase.instance.client
-                .from('users')
-                .update({'fcm_token': fcmToken})
-                .eq('id', userId);
-          }
-        }
-      } catch (_) {}
+      await registerFcmToken();
 
       if (!mounted) return;
       Navigator.pushReplacement(
@@ -891,6 +1003,8 @@ class _LoginPageState extends State<LoginPage> {
         idToken: idToken,
         accessToken: accessToken,
       );
+
+      await registerFcmToken();
 
       final currentUser = Supabase.instance.client.auth.currentUser;
       final needsNickname = currentUser != null
@@ -1558,10 +1672,31 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   final supabase = Supabase.instance.client;
 
+  // Cached like GroupDashboardPage's futures below — calling fetchGroups()
+  // straight from `future:` in build() meant it re-ran on every setState,
+  // including ones that have nothing to do with the group list.
+  late Future<List<dynamic>> _groupsFuture;
+
+  void _refreshGroups() => _groupsFuture = fetchUserGroups();
+
   @override
   void initState() {
     super.initState();
+    // First load only: use the fetch SplashScreen already kicked off during
+    // the intro video, if it's there, instead of starting a second one now.
+    _groupsFuture = preloadedGroupsFuture ?? fetchUserGroups();
+    preloadedGroupsFuture = null;
     WidgetsBinding.instance.addPostFrameCallback((_) => _maybeShowNotificationPrompt());
+    WidgetsBinding.instance.addPostFrameCallback((_) => _maybeHandlePendingInvite());
+  }
+
+  /// Picks up an invite code stashed by [_handleInviteUri] when the app
+  /// wasn't ready (or logged in) yet to jump to the join flow directly.
+  void _maybeHandlePendingInvite() {
+    final code = pendingInviteCode;
+    if (code == null) return;
+    pendingInviteCode = null;
+    Navigator.push(context, MaterialPageRoute(builder: (_) => JoinGroupPage(initialCode: code)));
   }
 
   Future<void> _maybeShowNotificationPrompt() async {
@@ -1606,32 +1741,7 @@ class _HomePageState extends State<HomePage> {
     await supabase.auth.signOut();
   }
 
-  Future<List<dynamic>> fetchGroups() async {
-  final user = supabase.auth.currentUser;
-
-  if (user == null) {
-    return [];
-  }
-
-  final memberships = await supabase
-      .from('group_members')
-      .select('group_id')
-      .eq('user_id', user.id);
-
-  final groupIds = memberships.map((m) => m['group_id']).toList();
-
-  if (groupIds.isEmpty) {
-    return [];
-  }
-
-  final groups = await supabase
-      .from('groups')
-      .select()
-      .inFilter('id', groupIds)
-      .order('created_at', ascending: false);
-
-  return groups;
-}
+  Future<List<dynamic>> fetchGroups() => fetchUserGroups();
 
   Widget _groupCardChip(String label, {Color? accent}) {
     return Container(
@@ -1810,9 +1920,9 @@ class _HomePageState extends State<HomePage> {
       ),
   body: AppBackground(
         child: RefreshIndicator(
-          onRefresh: () async => setState(() {}),
+          onRefresh: () async => setState(_refreshGroups),
           child: FutureBuilder<List<dynamic>>(
-            future: fetchGroups(),
+            future: _groupsFuture,
             builder: (context, snapshot) {
               final groups = snapshot.data ?? [];
               final isLoading =
@@ -1863,7 +1973,7 @@ class _HomePageState extends State<HomePage> {
                   context,
                   MaterialPageRoute(builder: (_) => const CreateGroupPage()),
                 );
-                if (created == true) setState(() {});
+                if (created == true) setState(_refreshGroups);
               },
             ),
             ListTile(
@@ -1875,7 +1985,7 @@ class _HomePageState extends State<HomePage> {
                   context,
                   MaterialPageRoute(builder: (_) => const JoinGroupPage()),
                 );
-                if (joined == true) setState(() {});
+                if (joined == true) setState(_refreshGroups);
               },
             ),
           ],
@@ -1954,7 +2064,7 @@ class _CreateGroupPageState extends State<CreateGroupPage> {
 
       Navigator.pop(context, true);
     } catch (e) {
-      showError(e.toString());
+      showError(friendlyError(e));
     }
 
     setState(() => isLoading = false);
@@ -1973,8 +2083,8 @@ class _CreateGroupPageState extends State<CreateGroupPage> {
         title: const Text('Create Group'),
       ),
       body: AppBackground(
-        child: Padding(
-        padding: const EdgeInsets.all(24),
+        child: SingleChildScrollView(
+        padding: EdgeInsets.fromLTRB(24, 24, 24, MediaQuery.of(context).padding.bottom + 24),
         child: Column(
           children: [
             const Text(
@@ -2029,6 +2139,33 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
   Set<String> _selectedStatKeys = kDefaultStatKeys.toSet();
   int _myLifetimeEarned = 0;
 
+  // These used to be called straight from `future:` inside build(), which
+  // meant ANY setState anywhere on this page — even purely local UI state
+  // like the compare-players picker — kicked off all seven queries again
+  // from scratch. That's what made things like "submit a photo, then wait
+  // for the whole page to reload" and "toggle a picker, page flickers"
+  // happen. Now they're cached here and only reassigned by
+  // [_refreshDashboardData], called just from spots that actually changed
+  // server-side state.
+  late Future<Map<String, dynamic>> _hybridJudgeUploadStatusFuture;
+  late Future<int> _unreadCountFuture;
+  late Future<Map<String, dynamic>> _headerDataFuture;
+  late Future<List<Map<String, dynamic>>> _noticesFuture;
+  late Future<List<Map<String, dynamic>>> _battleStatusFuture;
+  late Future<List<dynamic>> _membersFuture;
+  late Future<List<Map<String, dynamic>>> _statsBarFuture;
+
+  void _refreshDashboardData() {
+    _hybridJudgeUploadStatusFuture = _hybridJudgeUploadStatus();
+    _unreadCountFuture = fetchGroupUnreadCount(widget.group['id']);
+    _headerDataFuture = _fetchHeaderData();
+    _noticesFuture = _fetchAllNotices();
+    _battleStatusFuture = fetchBattleStatus();
+    _membersFuture = fetchMembersWithNames();
+    _statsBarFuture = _fetchStatsBarData();
+    _loadMyRank();
+  }
+
   @override
   void initState() {
     super.initState();
@@ -2038,6 +2175,7 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
     _loadSelectedStatKeys();
     _settleCoinPayouts(widget.group['id']);
     _loadMyRank();
+    _refreshDashboardData();
   }
 
   Future<void> _loadMyRank() async {
@@ -2954,7 +3092,7 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
         .eq('group_id', widget.group['id'])
         .eq('user_id', user.id);
 
-    if (mounted) setState(() {});
+    if (mounted) setState(_refreshDashboardData);
   }
   Future<int> _checkPendingJudging() async {
     final supabase = Supabase.instance.client;
@@ -3099,48 +3237,25 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
   }
 
   Future<void> _deleteGroup() async {
-    final controller = TextEditingController();
-
     final confirm = await showDialog<bool>(
       context: context,
-      builder: (dialogContext) => StatefulBuilder(
-        builder: (dialogContext, setDialogState) => AlertDialog(
-          title: const Text('Delete Group'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'This permanently deletes the group, all photos, scores, messages, '
-                'and members. This cannot be undone.',
-              ),
-              const SizedBox(height: 16),
-              Text(
-                'Type "${widget.group['name'] ?? 'DELETE'}" to confirm:',
-                style: const TextStyle(fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 8),
-              TextField(
-                controller: controller,
-                onChanged: (_) => setDialogState(() {}),
-                decoration: const InputDecoration(border: OutlineInputBorder()),
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext, false),
-              child: const Text('Cancel'),
-            ),
-            ElevatedButton(
-              style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
-              onPressed: controller.text.trim() == (widget.group['name'] ?? 'DELETE')
-                  ? () => Navigator.pop(dialogContext, true)
-                  : null,
-              child: const Text('Delete Forever'),
-            ),
-          ],
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Delete Group?'),
+        content: const Text(
+          'This permanently deletes the group for everyone — all photos, scores, '
+          'messages, and members. This cannot be undone.',
         ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Delete'),
+          ),
+        ],
       ),
     );
 
@@ -3155,13 +3270,33 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
           .select('id')
           .eq('group_id', groupId);
       final submissionIds = submissions.map((s) => s['id']).toList();
-
       if (submissionIds.isNotEmpty) {
         await supabase.from('scores').delete().inFilter('submission_id', submissionIds);
       }
+
+      final bluffRounds = await supabase.from('bluff_rounds').select('id').eq('group_id', groupId);
+      final bluffRoundIds = bluffRounds.map((r) => r['id']).toList();
+      if (bluffRoundIds.isNotEmpty) {
+        await supabase.from('bluff_guesses').delete().inFilter('round_id', bluffRoundIds);
+      }
+
+      final rouletteRounds =
+          await supabase.from('photo_roulette_rounds').select('id').eq('group_id', groupId);
+      final rouletteRoundIds = rouletteRounds.map((r) => r['id']).toList();
+      if (rouletteRoundIds.isNotEmpty) {
+        await supabase.from('photo_roulette_guess_entries').delete().inFilter('round_id', rouletteRoundIds);
+        await supabase.from('photo_roulette_photos').delete().inFilter('round_id', rouletteRoundIds);
+        await supabase.from('photo_roulette_invites').delete().inFilter('round_id', rouletteRoundIds);
+      }
+
       await supabase.from('submissions').delete().eq('group_id', groupId);
       await supabase.from('messages').delete().eq('group_id', groupId);
       await supabase.from('invites').delete().eq('group_id', groupId);
+      await supabase.from('coin_transactions').delete().eq('group_id', groupId);
+      await supabase.from('streak_shields').delete().eq('group_id', groupId);
+      await supabase.from('predictions').delete().eq('group_id', groupId);
+      await supabase.from('bluff_rounds').delete().eq('group_id', groupId);
+      await supabase.from('photo_roulette_rounds').delete().eq('group_id', groupId);
       await supabase.from('group_members').delete().eq('group_id', groupId);
       await supabase.from('groups').delete().eq('id', groupId);
 
@@ -3288,7 +3423,9 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
                 SharePlus.instance.share(
                   ShareParams(
                     text: '🥊 Join my Nemesis group "$groupName" as a ${roleLabel(role)}!\n\n'
-                        'Download My Nemesis and enter this invite code: $inviteCode',
+                        'Tap to join: mynemesis://join?code=$inviteCode\n\n'
+                        'Don\'t have the app yet? Install My Nemesis first, then tap the '
+                        'link again — or enter this code by hand: $inviteCode',
                   ),
                 );
               },
@@ -3416,6 +3553,8 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
       final image = await picker.pickImage(
         source: ImageSource.camera,
         imageQuality: 85,
+        maxWidth: kPhotoMaxDimension,
+        maxHeight: kPhotoMaxDimension,
       );
 
       if (image == null) {
@@ -3473,7 +3612,12 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
         ),
       );
     }
-    if (mounted) setState(() => _uploading = false);
+    if (mounted) {
+      setState(() {
+        _uploading = false;
+        _refreshDashboardData();
+      });
+    }
   }
 
   Widget _navBarIcon({
@@ -3582,7 +3726,7 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
           ),
           isHybridJudge
               ? FutureBuilder<Map<String, dynamic>>(
-                  future: _hybridJudgeUploadStatus(),
+                  future: _hybridJudgeUploadStatusFuture,
                   builder: (context, snapshot) {
                     final status = snapshot.data;
                     final canUploadNow = status?['canUpload'] as bool? ?? false;
@@ -3608,7 +3752,7 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
                                 MaterialPageRoute(
                                   builder: (_) => JudgePhotosPage(group: widget.group),
                                 ),
-                              ).then((_) => setState(() {}));
+                              ).then((_) => setState(_refreshDashboardData));
                             },
                     );
                   },
@@ -3627,7 +3771,7 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
                         },
                 ),
           FutureBuilder<int>(
-            future: fetchGroupUnreadCount(widget.group['id']),
+            future: _unreadCountFuture,
             builder: (context, snapshot) {
               return _navBarIcon(
                 icon: FontAwesomeIcons.commentDots,
@@ -3691,7 +3835,7 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
                   MaterialPageRoute(
                     builder: (_) => SettingsPage(group: widget.group),
                   ),
-                ).then((_) => setState(() {}));
+                ).then((_) => setState(_refreshDashboardData));
            } else if (value == 'rules') {
                 Navigator.push(
                   context,
@@ -3729,7 +3873,7 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
                   MaterialPageRoute(
                     builder: (_) => ManageMembersPage(group: widget.group),
                   ),
-                );
+                ).then((_) => setState(_refreshDashboardData));
               } else if (value == 'leave_group') {
                 _leaveGroup();
               } else if (value == 'delete_group') {
@@ -3778,16 +3922,16 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
 body: AppBackground(
         group: widget.group,
         child: RefreshIndicator(
-        onRefresh: () async => setState(() {}),
+        onRefresh: () async => setState(_refreshDashboardData),
         child: SingleChildScrollView(
           physics: const AlwaysScrollableScrollPhysics(),
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(20, 20, 20, 100),
+            padding: EdgeInsets.fromLTRB(20, 20, 20, MediaQuery.of(context).padding.bottom + 100),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               FutureBuilder<Map<String, dynamic>>(
-                future: _fetchHeaderData(),
+                future: _headerDataFuture,
                 builder: (context, snapshot) {
                   final data = snapshot.data;
                   final leader = data?['leader'] as Map<String, dynamic>?;
@@ -3869,7 +4013,7 @@ body: AppBackground(
               ),
               const SizedBox(height: 20),
               FutureBuilder<List<Map<String, dynamic>>>(
-                future: _fetchAllNotices(),
+                future: _noticesFuture,
                 builder: (context, snapshot) {
                   final notices = snapshot.data ?? [];
                   if (notices.isEmpty) return const SizedBox.shrink();
@@ -3909,7 +4053,7 @@ body: AppBackground(
               ),
               const SizedBox(height: 10),
               FutureBuilder<List<Map<String, dynamic>>>(
-                future: fetchBattleStatus(),
+                future: _battleStatusFuture,
                 builder: (context, snapshot) {
                   if (snapshot.connectionState == ConnectionState.waiting) {
                     return const Card(
@@ -4037,7 +4181,7 @@ body: AppBackground(
                           MaterialPageRoute(
                             builder: (_) => StorePage(group: widget.group),
                           ),
-                        ).then((_) => setState(() {}));
+                        ).then((_) => setState(_refreshDashboardData));
                       },
                     ),
                   ),
@@ -4053,7 +4197,7 @@ body: AppBackground(
                           MaterialPageRoute(
                             builder: (_) => MiniGamesPage(group: widget.group),
                           ),
-                        ).then((_) => setState(() {}));
+                        ).then((_) => setState(_refreshDashboardData));
                       },
                     ),
                   ),
@@ -4061,7 +4205,7 @@ body: AppBackground(
               ),
               const SizedBox(height: 16),
               FutureBuilder<List<dynamic>>(
-                future: fetchMembersWithNames(),
+                future: _membersFuture,
                 builder: (context, snapshot) {
                   if (snapshot.connectionState == ConnectionState.waiting) {
                     return const Card(
@@ -4200,7 +4344,7 @@ body: AppBackground(
               ),
               const SizedBox(height: 16),
               FutureBuilder<List<Map<String, dynamic>>>(
-                future: _fetchStatsBarData(),
+                future: _statsBarFuture,
                 builder: (context, snapshot) {
                   final stats = snapshot.data ?? [];
                   if (stats.length < 2) return const SizedBox.shrink();
@@ -4514,7 +4658,11 @@ class _ComparePickerSheetState extends State<_ComparePickerSheet> {
 }
 
 class JoinGroupPage extends StatefulWidget {
-  const JoinGroupPage({super.key});
+  /// Pre-fills and auto-submits the invite code, e.g. when opened from a
+  /// shared `mynemesis://join?code=XXXX` link instead of typed by hand.
+  final String? initialCode;
+
+  const JoinGroupPage({super.key, this.initialCode});
 
   @override
   State<JoinGroupPage> createState() => _JoinGroupPageState();
@@ -4525,6 +4673,16 @@ class _JoinGroupPageState extends State<JoinGroupPage> {
   final supabase = Supabase.instance.client;
 
   bool isLoading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    final code = widget.initialCode;
+    if (code != null) {
+      inviteCodeController.text = code;
+      WidgetsBinding.instance.addPostFrameCallback((_) => joinGroup());
+    }
+  }
 
   Future<void> joinGroup() async {
     final user = supabase.auth.currentUser;
@@ -4656,7 +4814,12 @@ class _JoinGroupPageState extends State<JoinGroupPage> {
         result: true,
       );
     } catch (e) {
-      showError(e.toString());
+      final message = e.toString().toLowerCase();
+      if (message.contains('pgrst116') || message.contains('0 rows')) {
+        showError('Invalid or expired invite code. Double-check it with whoever sent it.');
+      } else {
+        showError(friendlyError(e));
+      }
     }
 
     setState(() => isLoading = false);
@@ -4675,8 +4838,8 @@ class _JoinGroupPageState extends State<JoinGroupPage> {
         title: const Text('Join Group'),
       ),
       body: AppBackground(
-        child: Padding(
-        padding: const EdgeInsets.all(24),
+        child: SingleChildScrollView(
+        padding: EdgeInsets.fromLTRB(24, 24, 24, MediaQuery.of(context).padding.bottom + 24),
         child: Column(
           children: [
             const Text(
@@ -7215,6 +7378,28 @@ class _StorePageState extends State<StorePage> {
     });
   }
 
+  void _showItemInfo(StoreItemDef item) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Row(
+          children: [
+            FaIcon(item.icon, size: 18, color: kAccentGold),
+            const SizedBox(width: 10),
+            Expanded(child: Text(item.name)),
+          ],
+        ),
+        content: Text(item.howToUse),
+        actions: [
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Got it'),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _onBuy(StoreItemDef item) {
     switch (item.key) {
       case 'custom_title':
@@ -7420,7 +7605,24 @@ class _StorePageState extends State<StorePage> {
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  Text(item.name, style: const TextStyle(fontWeight: FontWeight.bold)),
+                                  Row(
+                                    children: [
+                                      Text(item.name, style: const TextStyle(fontWeight: FontWeight.bold)),
+                                      const SizedBox(width: 4),
+                                      InkWell(
+                                        borderRadius: BorderRadius.circular(20),
+                                        onTap: () => _showItemInfo(item),
+                                        child: Padding(
+                                          padding: const EdgeInsets.all(4),
+                                          child: FaIcon(
+                                            FontAwesomeIcons.circleInfo,
+                                            size: 13,
+                                            color: Colors.white.withOpacity(0.4),
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
                                   const SizedBox(height: 2),
                                   Text(
                                     item.description,
@@ -7976,7 +8178,12 @@ class _BluffGamePageState extends State<BluffGamePage> {
     if (user == null || _busy) return;
 
     final picker = ImagePicker();
-    final image = await picker.pickImage(source: ImageSource.gallery, imageQuality: 85);
+    final image = await picker.pickImage(
+      source: ImageSource.gallery,
+      imageQuality: 85,
+      maxWidth: kPhotoMaxDimension,
+      maxHeight: kPhotoMaxDimension,
+    );
     if (image == null) return;
 
     if (!mounted) return;
@@ -8316,19 +8523,6 @@ String _formatShortTime(DateTime t) {
 
 const Map<int, int> kPhotoRouletteStake = {1: 8, 3: 18, 5: 28};
 const Map<int, int> kPhotoRouletteGuessStake = {1: 3, 3: 6, 5: 10};
-const int kPhotoRouletteMaxRerolls = 2;
-
-Widget _assetThumb(AssetEntity asset, {double? width, double? height, BoxFit fit = BoxFit.cover}) {
-  return FutureBuilder<Uint8List?>(
-    future: asset.thumbnailDataWithSize(const ThumbnailSize(500, 500)),
-    builder: (context, snapshot) {
-      if (!snapshot.hasData) {
-        return Container(width: width, height: height, color: kSurfaceColor);
-      }
-      return Image.memory(snapshot.data!, width: width, height: height, fit: fit);
-    },
-  );
-}
 
 /// Lazily advances every open Photo Roulette round in a group one step:
 /// pending -> guessing (once every expected participant has submitted their
@@ -8661,43 +8855,52 @@ class _PhotoRoulettePageState extends State<PhotoRoulettePage> {
   }
 
   Future<void> _startRoundFlow() async {
-    final members =
-        await supabase.from('group_members').select().eq('group_id', widget.group['id']);
     final user = supabase.auth.currentUser;
-    final otherMembers = members.where((m) => m['user_id'] != user?.id).toList();
+    if (user == null) return;
 
-    if (otherMembers.isEmpty) {
+    final members = await supabase
+        .from('group_members')
+        .select()
+        .eq('group_id', widget.group['id'])
+        .inFilter('role', ['owner', 'player', 'judge']);
+
+    // Open to every competing member, not a hand-picked rival — with only
+    // two participants, "whose photo is whose" is a trivial binary guess.
+    final otherCompeting = members
+        .where((m) =>
+            m['user_id'] != user.id &&
+            (m['role'] == 'player' ||
+                (m['role'] == 'owner' && (m['owner_is_judge'] != true || m['judge_also_plays'] == true)) ||
+                (m['role'] == 'judge' && m['judge_also_plays'] == true)))
+        .toList();
+
+    if (otherCompeting.isEmpty) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('No one else to invite yet.')),
+        const SnackBar(content: Text('Need at least one other competing player in the group.')),
       );
       return;
     }
 
     if (!mounted) return;
-    final result = await showModalBottomSheet<Map<String, dynamic>>(
+    final size = await showModalBottomSheet<int>(
       context: context,
       isScrollControlled: true,
       backgroundColor: kSurfaceColor,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
-      builder: (context) =>
-          _RouletteCreateSheet(members: otherMembers, usersById: _usersById),
+      builder: (context) => const _RouletteCreateSheet(),
     );
 
-    if (result == null || !mounted) return;
+    if (size == null || !mounted) return;
 
     try {
-      final size = result['size'] as int;
-      final inviteeIds = result['inviteeIds'] as List<String>;
-      final currentUser = supabase.auth.currentUser!;
-
       final roundRow = await supabase
           .from('photo_roulette_rounds')
           .insert({
             'group_id': widget.group['id'],
-            'initiator_id': currentUser.id,
+            'initiator_id': user.id,
             'photos_per_participant': size,
             'stake_per_participant': kPhotoRouletteStake[size],
             'guess_stake': kPhotoRouletteGuessStake[size],
@@ -8708,7 +8911,7 @@ class _PhotoRoulettePageState extends State<PhotoRoulettePage> {
           .single();
 
       await supabase.from('photo_roulette_invites').insert([
-        for (final id in inviteeIds) {'round_id': roundRow['id'], 'invitee_id': id},
+        for (final m in otherCompeting) {'round_id': roundRow['id'], 'invitee_id': m['user_id']},
       ]);
 
       analytics.logEvent(name: 'roulette_round_started');
@@ -8935,10 +9138,7 @@ class _PhotoRoulettePageState extends State<PhotoRoulettePage> {
 }
 
 class _RouletteCreateSheet extends StatefulWidget {
-  final List<dynamic> members;
-  final Map<String, Map<String, dynamic>> usersById;
-
-  const _RouletteCreateSheet({required this.members, required this.usersById});
+  const _RouletteCreateSheet();
 
   @override
   State<_RouletteCreateSheet> createState() => _RouletteCreateSheetState();
@@ -8946,7 +9146,6 @@ class _RouletteCreateSheet extends StatefulWidget {
 
 class _RouletteCreateSheetState extends State<_RouletteCreateSheet> {
   int _size = 3;
-  final Set<String> _selected = {};
 
   @override
   Widget build(BuildContext context) {
@@ -8957,6 +9156,11 @@ class _RouletteCreateSheetState extends State<_RouletteCreateSheet> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const Text('Start Photo Roulette', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 4),
+          const Text(
+            'Opens to every competing player in the group — the more people, the harder it is to guess whose photo is whose.',
+            style: TextStyle(fontSize: 12, color: Colors.white70),
+          ),
           const SizedBox(height: 16),
           const Text('Round size', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
           const SizedBox(height: 8),
@@ -8971,38 +9175,11 @@ class _RouletteCreateSheetState extends State<_RouletteCreateSheet> {
             }).toList(),
           ),
           const SizedBox(height: 16),
-          const Text('Invite', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
-          const SizedBox(height: 8),
-          ConstrainedBox(
-            constraints: const BoxConstraints(maxHeight: 240),
-            child: ListView(
-              shrinkWrap: true,
-              children: widget.members.map((m) {
-                final uid = m['user_id'] as String;
-                final username = widget.usersById[uid]?['username'] as String? ?? 'Unknown';
-                final isSelected = _selected.contains(uid);
-                return CheckboxListTile(
-                  value: isSelected,
-                  title: Text(username),
-                  onChanged: (v) => setState(() {
-                    if (v == true) {
-                      _selected.add(uid);
-                    } else {
-                      _selected.remove(uid);
-                    }
-                  }),
-                );
-              }).toList(),
-            ),
-          ),
-          const SizedBox(height: 16),
           SizedBox(
             width: double.infinity,
             child: ElevatedButton(
-              onPressed: _selected.isEmpty
-                  ? null
-                  : () => Navigator.pop(context, {'size': _size, 'inviteeIds': _selected.toList()}),
-              child: const Text('Send Invites'),
+              onPressed: () => Navigator.pop(context, _size),
+              child: const Text('Start Round'),
             ),
           ),
         ],
@@ -9024,113 +9201,57 @@ class _RouletteSubmitPage extends StatefulWidget {
 class _RouletteSubmitPageState extends State<_RouletteSubmitPage> {
   final supabase = Supabase.instance.client;
   late final int _photosNeeded;
-  final List<AssetEntity> _locked = [];
-  AssetEntity? _current;
-  int _rerollsUsed = 0;
-  bool _loadingAsset = false;
+  List<XFile> _selected = [];
+  bool _rolling = false;
   bool _submitting = false;
-  String? _permissionError;
+  String? _error;
+
+  int get _minBatchSize => _photosNeeded + 4;
 
   @override
   void initState() {
     super.initState();
     _photosNeeded = widget.round['photos_per_participant'] as int;
-    _startSlot();
   }
 
-  Future<void> _startSlot() async {
-    setState(() {
-      _current = null;
-      _rerollsUsed = 0;
-      _permissionError = null;
-      _loadingAsset = true;
-    });
-
+  /// Uses the standard system photo picker (no gallery-scanning permission
+  /// needed) to grab a batch, then has the app itself randomly choose the
+  /// entries from within it — keeps genuine, player-uncontrolled randomness
+  /// without requesting broad READ_MEDIA_IMAGES access.
+  Future<void> _chooseBatch() async {
+    setState(() => _error = null);
     try {
-      final permission = await PhotoManager.requestPermissionExtend();
-      if (!permission.isAuth && !permission.hasAccess) {
+      final picker = ImagePicker();
+      final picked = await picker.pickMultiImage(
+        imageQuality: 85,
+        maxWidth: kPhotoMaxDimension,
+        maxHeight: kPhotoMaxDimension,
+      );
+      if (picked.isEmpty) return;
+
+      if (picked.length < _minBatchSize) {
         if (!mounted) return;
         setState(() {
-          _loadingAsset = false;
-          _permissionError = 'Gallery access is needed to play Photo Roulette.';
+          _error = 'Pick at least $_minBatchSize photos so the random pick actually means something.';
         });
         return;
       }
-    } catch (e) {
-      // A failure here (e.g. the gallery plugin not yet registered after a
-      // hot-restart instead of a full app relaunch) must never leave the
-      // spinner stuck forever — surface it with a retry instead.
+
+      setState(() => _rolling = true);
+      await Future.delayed(const Duration(milliseconds: 900));
+
+      final shuffled = [...picked]..shuffle();
       if (!mounted) return;
       setState(() {
-        _loadingAsset = false;
-        _permissionError = friendlyError(e);
-      });
-      return;
-    }
-
-    await _pickRandomAsset();
-  }
-
-  Future<void> _pickRandomAsset() async {
-    setState(() => _loadingAsset = true);
-    try {
-      final albums = await PhotoManager.getAssetPathList(onlyAll: true, type: RequestType.image);
-      if (albums.isEmpty) {
-        if (!mounted) return;
-        setState(() {
-          _loadingAsset = false;
-          _permissionError = 'No photos found in your gallery.';
-        });
-        return;
-      }
-
-      final album = albums.first;
-      final count = await album.assetCountAsync;
-      if (count == 0) {
-        if (!mounted) return;
-        setState(() {
-          _loadingAsset = false;
-          _permissionError = 'No photos found in your gallery.';
-        });
-        return;
-      }
-
-      final excludedIds = _locked.map((a) => a.id).toSet();
-      AssetEntity? picked;
-      for (var attempt = 0; attempt < 10; attempt++) {
-        final index = Random().nextInt(count);
-        final page = await album.getAssetListRange(start: index, end: index + 1);
-        if (page.isEmpty) continue;
-        if (excludedIds.contains(page.first.id)) continue;
-        picked = page.first;
-        break;
-      }
-
-      if (!mounted) return;
-      setState(() {
-        _current = picked;
-        _loadingAsset = false;
+        _selected = shuffled.take(_photosNeeded).toList();
+        _rolling = false;
       });
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _loadingAsset = false;
-        _permissionError = friendlyError(e);
+        _rolling = false;
+        _error = friendlyError(e);
       });
-    }
-  }
-
-  void _reroll() {
-    if (_rerollsUsed >= kPhotoRouletteMaxRerolls) return;
-    setState(() => _rerollsUsed++);
-    _pickRandomAsset();
-  }
-
-  void _useThis() {
-    if (_current == null) return;
-    setState(() => _locked.add(_current!));
-    if (_locked.length < _photosNeeded) {
-      _startSlot();
     }
   }
 
@@ -9154,9 +9275,8 @@ class _RouletteSubmitPageState extends State<_RouletteSubmitPage> {
       final roundId = widget.round['id'] as String;
       final rows = <Map<String, dynamic>>[];
 
-      for (var i = 0; i < _locked.length; i++) {
-        final bytes = await _locked[i].originBytes;
-        if (bytes == null) continue;
+      for (var i = 0; i < _selected.length; i++) {
+        final bytes = await _selected[i].readAsBytes();
         final path = 'roulette_photos/$roundId/${user.id}/$i.jpg';
         await supabase.storage.from('Photos').uploadBinary(
               path,
@@ -9198,82 +9318,68 @@ class _RouletteSubmitPageState extends State<_RouletteSubmitPage> {
 
   @override
   Widget build(BuildContext context) {
-    final allLocked = _locked.length >= _photosNeeded;
-
     return Scaffold(
-      appBar: AppBar(
-        title: Text(allLocked ? 'Review Photos' : 'Photo ${_locked.length + 1} of $_photosNeeded'),
-      ),
+      appBar: AppBar(title: const Text('Photo Roulette')),
       body: AppBackground(
         group: widget.group,
         child: Padding(
-          padding: const EdgeInsets.all(20),
-          child: allLocked ? _buildReview() : _buildPicker(),
+          padding: EdgeInsets.fromLTRB(20, 20, 20, MediaQuery.of(context).padding.bottom + 20),
+          child: _selected.isNotEmpty ? _buildReview() : _buildChoose(),
         ),
       ),
     );
   }
 
-  Widget _buildPicker() {
-    if (_permissionError != null) {
-      return Center(
+  Widget _buildChoose() {
+    if (_rolling) {
+      return const Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const FaIcon(FontAwesomeIcons.triangleExclamation, size: 40, color: Colors.redAccent),
-            const SizedBox(height: 12),
-            Text(_permissionError!, textAlign: TextAlign.center),
-            const SizedBox(height: 16),
-            ElevatedButton(onPressed: _startSlot, child: const Text('Try Again')),
+            CircularProgressIndicator(),
+            SizedBox(height: 16),
+            Text('Rolling...', style: TextStyle(fontWeight: FontWeight.bold)),
           ],
         ),
       );
     }
 
-    if (_loadingAsset || _current == null) {
-      return const Center(child: CircularProgressIndicator());
-    }
-
-    return Column(
-      children: [
-        const Text(
-          'Random photo pulled from your gallery. Take a look before it\'s locked in.',
-          textAlign: TextAlign.center,
-          style: TextStyle(color: Colors.white70),
-        ),
-        const SizedBox(height: 20),
-        Expanded(
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(16),
-            child: _assetThumb(_current!, width: double.infinity, height: double.infinity),
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const FaIcon(FontAwesomeIcons.shuffle, size: 40, color: kAccentGold),
+          const SizedBox(height: 16),
+          Text(
+            'Pick at least $_minBatchSize photos from your gallery. The app will randomly '
+            'choose $_photosNeeded of them — you won\'t know which until they\'re revealed.',
+            textAlign: TextAlign.center,
+            style: const TextStyle(color: Colors.white70),
           ),
-        ),
-        const SizedBox(height: 20),
-        Row(
-          children: [
-            Expanded(
-              child: OutlinedButton(
-                onPressed: _rerollsUsed >= kPhotoRouletteMaxRerolls ? null : _reroll,
-                child: Text('Reroll (${kPhotoRouletteMaxRerolls - _rerollsUsed} left)'),
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: ElevatedButton(
-                onPressed: _useThis,
-                child: const Text('Use This'),
-              ),
-            ),
+          if (_error != null) ...[
+            const SizedBox(height: 12),
+            Text(_error!, style: const TextStyle(color: Colors.redAccent), textAlign: TextAlign.center),
           ],
-        ),
-      ],
+          const SizedBox(height: 20),
+          ElevatedButton.icon(
+            onPressed: _chooseBatch,
+            icon: const FaIcon(FontAwesomeIcons.images),
+            label: const Text('Choose Photos'),
+          ),
+        ],
+      ),
     );
   }
 
   Widget _buildReview() {
     return Column(
       children: [
-        const Text('Your photos', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+        const Text('Your random photos', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+        const SizedBox(height: 4),
+        const Text(
+          'These were randomly chosen from your batch — this is your entry.',
+          style: TextStyle(fontSize: 12, color: Colors.white70),
+        ),
         const SizedBox(height: 12),
         Expanded(
           child: GridView.builder(
@@ -9282,14 +9388,22 @@ class _RouletteSubmitPageState extends State<_RouletteSubmitPage> {
               crossAxisSpacing: 8,
               mainAxisSpacing: 8,
             ),
-            itemCount: _locked.length,
+            itemCount: _selected.length,
             itemBuilder: (context, index) => ClipRRect(
               borderRadius: BorderRadius.circular(10),
-              child: _assetThumb(_locked[index]),
+              child: Image.file(File(_selected[index].path), fit: BoxFit.cover),
             ),
           ),
         ),
-        const SizedBox(height: 16),
+        const SizedBox(height: 12),
+        SizedBox(
+          width: double.infinity,
+          child: OutlinedButton(
+            onPressed: _submitting ? null : () => setState(() => _selected = []),
+            child: const Text('Choose Different Photos'),
+          ),
+        ),
+        const SizedBox(height: 8),
         SizedBox(
           width: double.infinity,
           child: ElevatedButton(
@@ -9456,7 +9570,7 @@ class _RouletteGuessPageState extends State<_RouletteGuessPage> {
         child: _loading
             ? const Center(child: CircularProgressIndicator())
             : Padding(
-                padding: const EdgeInsets.all(16),
+                padding: EdgeInsets.fromLTRB(16, 16, 16, MediaQuery.of(context).padding.bottom + 16),
                 child: Column(
                   children: [
                     const Text(
@@ -10134,7 +10248,12 @@ try {
     final supabase = Supabase.instance.client;
     final picker = ImagePicker();
 
-    final image = await picker.pickImage(source: ImageSource.gallery, imageQuality: 85);
+    final image = await picker.pickImage(
+      source: ImageSource.gallery,
+      imageQuality: 85,
+      maxWidth: kPhotoMaxDimension,
+      maxHeight: kPhotoMaxDimension,
+    );
     if (image == null) return;
 
     if (!mounted) return;
@@ -10265,7 +10384,12 @@ try {
     final supabase = Supabase.instance.client;
     final picker = ImagePicker();
 
-    final image = await picker.pickImage(source: ImageSource.gallery, imageQuality: 85);
+    final image = await picker.pickImage(
+      source: ImageSource.gallery,
+      imageQuality: 85,
+      maxWidth: kPhotoMaxDimension,
+      maxHeight: kPhotoMaxDimension,
+    );
     if (image == null) return;
 
     if (!mounted) return;
@@ -10548,6 +10672,13 @@ class _SplashScreenState extends State<SplashScreen> {
   @override
   void initState() {
     super.initState();
+
+    // Fire the group-list fetch now, in parallel with the video, instead of
+    // waiting until HomePage exists to start it — by the time the intro
+    // finishes, the data is often already there.
+    if (Supabase.instance.client.auth.currentSession != null) {
+      preloadedGroupsFuture = fetchUserGroups();
+    }
 
     _controller = VideoPlayerController.asset('assets/video/splash.mp4');
 
@@ -11233,7 +11364,12 @@ final Map<String, Future<String>> _signedUrlCache = {};
 
     try {
       final picker = ImagePicker();
-      final image = await picker.pickImage(source: source, imageQuality: 85);
+      final image = await picker.pickImage(
+        source: source,
+        imageQuality: 85,
+        maxWidth: kPhotoMaxDimension,
+        maxHeight: kPhotoMaxDimension,
+      );
       if (image == null) return;
 
       final file = File(image.path);
@@ -11581,8 +11717,8 @@ class _NotificationSettingsPageState extends State<NotificationSettingsPage> {
         group: widget.group,
         child: _loading
           ? const Center(child: CircularProgressIndicator())
-          : Padding(
-              padding: const EdgeInsets.all(20),
+          : SingleChildScrollView(
+              padding: EdgeInsets.fromLTRB(20, 20, 20, MediaQuery.of(context).padding.bottom + 20),
               child: Column(
                 children: [
                   Card(
@@ -11804,13 +11940,15 @@ Future<void> _issueWarning(Map<String, dynamic> member) async {
       );
     }
   }
-  Future<void> _changeRole(Map<String, dynamic> member, String newRole) async {
-    if (member['role'] == newRole) return;
-
+  /// Sets the owner's own play/judge mode in a single update instead of the
+  /// old two-step dance (toggle judging on, reopen the menu, toggle hybrid) —
+  /// the menu below always offers the two modes you're *not* currently in,
+  /// so any switch is one tap.
+  Future<void> _setOwnerMode(Map<String, dynamic> member, bool isJudge, bool alsoPlay) async {
     try {
       final result = await supabase
           .from('group_members')
-          .update({'role': newRole})
+          .update({'owner_is_judge': isJudge, 'judge_also_plays': isJudge && alsoPlay})
           .eq('id', member['id'])
           .select();
 
@@ -11818,11 +11956,12 @@ Future<void> _issueWarning(Map<String, dynamic> member) async {
 
       if (result.isEmpty) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Role change blocked by database permissions')),
+          const SnackBar(content: Text('Change blocked by database permissions')),
         );
       } else {
+        final label = !isJudge ? 'playing' : (alsoPlay ? 'judging & playing' : 'judging only');
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('${member['username']} is now a $newRole')),
+          SnackBar(content: Text('You are now $label')),
         );
         _loadMembers();
       }
@@ -11834,11 +11973,12 @@ Future<void> _issueWarning(Map<String, dynamic> member) async {
     }
   }
 
-  Future<void> _toggleOwnerIsJudge(Map<String, dynamic> member, bool newValue) async {
+  /// Same one-step fix as [_setOwnerMode], for every other member.
+  Future<void> _setMemberMode(Map<String, dynamic> member, String role, bool alsoPlay) async {
     try {
       final result = await supabase
           .from('group_members')
-          .update({'owner_is_judge': newValue})
+          .update({'role': role, 'judge_also_plays': role == 'judge' && alsoPlay})
           .eq('id', member['id'])
           .select();
 
@@ -11849,42 +11989,9 @@ Future<void> _issueWarning(Map<String, dynamic> member) async {
           const SnackBar(content: Text('Change blocked by database permissions')),
         );
       } else {
+        final label = role == 'player' ? 'a player' : (alsoPlay ? 'a judge who also plays' : 'a judge');
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(newValue ? 'You are now judging' : 'You are now playing')),
-        );
-        _loadMembers();
-      }
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(friendlyError(e))),
-      );
-    }
-  }
-
-  Future<void> _toggleJudgeAlsoPlays(Map<String, dynamic> member, bool newValue) async {
-    try {
-      final result = await supabase
-          .from('group_members')
-          .update({'judge_also_plays': newValue})
-          .eq('id', member['id'])
-          .select();
-
-      if (!mounted) return;
-
-      if (result.isEmpty) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Change blocked by database permissions')),
-        );
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              newValue
-                  ? '${member['username']} can now also play'
-                  : '${member['username']} is judge-only again',
-            ),
-          ),
+          SnackBar(content: Text('${member['username']} is now $label')),
         );
         _loadMembers();
       }
@@ -12024,35 +12131,37 @@ Future<void> _issueWarning(Map<String, dynamic> member) async {
             ? PopupMenuButton<String>(
                 icon: const FaIcon(FontAwesomeIcons.ellipsisVertical, color: Colors.white70),
                 onSelected: (value) {
-                  if (value == 'toggle_judging') {
-                    _toggleOwnerIsJudge(member, member['owner_is_judge'] != true);
-                  } else if (value == 'toggle_hybrid') {
-                    _toggleJudgeAlsoPlays(member, !judgeAlsoPlays);
+                  if (value == 'mode_play') {
+                    _setOwnerMode(member, false, false);
+                  } else if (value == 'mode_judge') {
+                    _setOwnerMode(member, true, false);
+                  } else if (value == 'mode_hybrid') {
+                    _setOwnerMode(member, true, true);
                   }
                 },
-                itemBuilder: (context) => [
-                  PopupMenuItem(
-                    value: 'toggle_judging',
-                    child: Text(member['owner_is_judge'] == true ? 'Stop Judging' : 'Start Judging'),
-                  ),
-                  if (member['owner_is_judge'] == true)
-                    PopupMenuItem(
-                      value: 'toggle_hybrid',
-                      child: Text(judgeAlsoPlays ? 'Judge only (stop playing)' : 'Also let me play'),
-                    ),
-                ],
+                itemBuilder: (context) {
+                  final ownerIsJudge = member['owner_is_judge'] == true;
+                  return [
+                    if (ownerIsJudge || judgeAlsoPlays)
+                      const PopupMenuItem(value: 'mode_play', child: Text('Play Only')),
+                    if (!ownerIsJudge || judgeAlsoPlays)
+                      const PopupMenuItem(value: 'mode_judge', child: Text('Judge Only')),
+                    if (!ownerIsJudge || !judgeAlsoPlays)
+                      const PopupMenuItem(value: 'mode_hybrid', child: Text('Judge & Play')),
+                  ];
+                },
               )
             : PopupMenuButton<String>(
                 icon: const FaIcon(FontAwesomeIcons.ellipsisVertical, color: Colors.white70),
                 onSelected: (value) {
                   if (value == 'transfer') {
                     _transferOwnership(member);
-                  } else if (value == 'make_judge') {
-                    _changeRole(member, 'judge');
-                  } else if (value == 'make_player') {
-                    _changeRole(member, 'player');
-                  } else if (value == 'toggle_hybrid') {
-                    _toggleJudgeAlsoPlays(member, !judgeAlsoPlays);
+                  } else if (value == 'mode_play') {
+                    _setMemberMode(member, 'player', false);
+                  } else if (value == 'mode_judge') {
+                    _setMemberMode(member, 'judge', false);
+                  } else if (value == 'mode_hybrid') {
+                    _setMemberMode(member, 'judge', true);
                   } else if (value == 'warn') {
                     _issueWarning(member);
                   } else if (value == 'remove') {
@@ -12061,15 +12170,12 @@ Future<void> _issueWarning(Map<String, dynamic> member) async {
                 },
                 itemBuilder: (context) => [
                   const PopupMenuItem(value: 'transfer', child: Text('Make Owner')),
-                  if (isJudge)
-                    const PopupMenuItem(value: 'make_player', child: Text('Make Player'))
-                  else
-                    const PopupMenuItem(value: 'make_judge', child: Text('Make Judge')),
-                  if (isJudge)
-                    PopupMenuItem(
-                      value: 'toggle_hybrid',
-                      child: Text(judgeAlsoPlays ? 'Judge only (stop playing)' : 'Let them also play'),
-                    ),
+                  if (isJudge || judgeAlsoPlays)
+                    const PopupMenuItem(value: 'mode_play', child: Text('Play Only')),
+                  if (!isJudge || judgeAlsoPlays)
+                    const PopupMenuItem(value: 'mode_judge', child: Text('Judge Only')),
+                  if (!isJudge || !judgeAlsoPlays)
+                    const PopupMenuItem(value: 'mode_hybrid', child: Text('Judge & Play')),
                   if (isJudge)
                     const PopupMenuItem(value: 'warn', child: Text('Issue Warning')),
                   const PopupMenuItem(value: 'remove', child: Text('Remove from Group')),
@@ -12318,6 +12424,8 @@ class _ProfilePageState extends State<ProfilePage> {
                   final img = await picker.pickImage(
                     source: ImageSource.camera,
                     imageQuality: 85,
+                    maxWidth: kPhotoMaxDimension,
+                    maxHeight: kPhotoMaxDimension,
                   );
                   if (context.mounted) Navigator.pop(context, img);
                 },
@@ -12329,6 +12437,8 @@ class _ProfilePageState extends State<ProfilePage> {
                   final img = await picker.pickImage(
                     source: ImageSource.gallery,
                     imageQuality: 85,
+                    maxWidth: kPhotoMaxDimension,
+                    maxHeight: kPhotoMaxDimension,
                   );
                   if (context.mounted) Navigator.pop(context, img);
                 },
