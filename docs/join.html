@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Join My Nemesis</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body {
+    font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    background: #15131B;
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    margin: 0;
+    padding: 24px;
+    box-sizing: border-box;
+  }
+  .card {
+    max-width: 360px;
+    text-align: center;
+  }
+  h1 { font-size: 1.4rem; margin-bottom: 8px; }
+  p { color: #ccc; line-height: 1.5; }
+  .btn {
+    display: inline-block;
+    margin-top: 20px;
+    padding: 14px 28px;
+    background: #E10600;
+    color: #fff;
+    text-decoration: none;
+    border-radius: 12px;
+    font-weight: 600;
+  }
+  .fallback {
+    margin-top: 32px;
+    font-size: 0.85rem;
+    color: #888;
+  }
+  .fallback a { color: #F3A93B; }
+  code {
+    background: #1E1A24;
+    padding: 4px 8px;
+    border-radius: 6px;
+    color: #F3A93B;
+  }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>🥊 You're invited<span id="groupSpan"></span>!</h1>
+    <p>Tap below to open My Nemesis and join.</p>
+    <a class="btn" id="openBtn" href="#">Open My Nemesis</a>
+    <div class="fallback">
+      <p>Nothing happen? You probably don't have the app yet.<br>
+      <a id="storeLink" href="https://play.google.com/store/apps/details?id=my.nemesis">Get My Nemesis on Google Play</a>,
+      then come back and tap this link again.</p>
+      <p>Or open the app and enter this code manually: <code id="codeText"></code></p>
+    </div>
+  </div>
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get('code') || '';
+    const group = params.get('group');
+
+    document.getElementById('codeText').textContent = code;
+    if (group) {
+      document.getElementById('groupSpan').textContent = ' to join "' + group + '"';
+    }
+
+    const appLink = 'mynemesis://join?code=' + encodeURIComponent(code);
+    document.getElementById('openBtn').href = appLink;
+
+    // Try to open the app automatically as soon as the page loads.
+    window.location.href = appLink;
+  </script>
+</body>
+</html>

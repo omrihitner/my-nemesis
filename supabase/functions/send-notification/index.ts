@@ -70,6 +70,7 @@ async function sendPushNotification(
   fcmToken: string,
   title: string,
   body: string,
+  data: Record<string, string>,
   imageUrl?: string
 ) {
   const projectId = FIREBASE_SERVICE_ACCOUNT.project_id;
@@ -91,6 +92,10 @@ async function sendPushNotification(
             body,
             ...(imageUrl ? { image: imageUrl } : {}),
           },
+          // FCM data payloads must be flat string maps — this is what lets a
+          // tapped notification open the group it's actually about, instead
+          // of just landing on the group list.
+          data,
           android: {
             priority: "high",
             notification: {
@@ -180,6 +185,7 @@ serve(async (req) => {
           user.fcm_token,
           title,
           body,
+          { type, groupId },
           type === "upload" ? photoSignedUrl : undefined
         );
 

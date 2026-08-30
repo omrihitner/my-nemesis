@@ -558,6 +558,10 @@ Future<void> _showLocalNotification(RemoteMessage message) async {
     id: notification.hashCode,
     title: notification.title,
     body: notification.body,
+    // Carried through so tapping this notification later (from the tray)
+    // can open the group it's actually about — see onDidReceiveNotification
+    // Response in main().
+    payload: message.data['groupId'] as String?,
     notificationDetails: NotificationDetails(
       android: AndroidNotificationDetails(
         kNotificationChannel.id,
@@ -568,6 +572,32 @@ Future<void> _showLocalNotification(RemoteMessage message) async {
       ),
     ),
   );
+}
+
+/// A group id from a notification tap that arrived before we could act on
+/// it (not logged in / app not ready yet). HomePage checks this once it's
+/// up, same pattern as [pendingInviteCode].
+String? pendingNotificationGroupId;
+
+/// Opens the group a notification was about, e.g. from tapping "New photo
+/// uploaded!" — instead of just landing on the group list and making the
+/// user hunt for which group it came from. Handles all three ways a tap can
+/// reach the app: a local notification tap while backgrounded, an FCM tap
+/// while backgrounded (onMessageOpenedApp), and a cold start from a tap
+/// (getInitialMessage) — see the three call sites in main().
+Future<void> _openGroupFromNotification(String groupId) async {
+  try {
+    final loggedIn = Supabase.instance.client.auth.currentUser != null;
+    final nav = navigatorKey.currentState;
+    if (!loggedIn || nav == null) {
+      pendingNotificationGroupId = groupId;
+      return;
+    }
+    final group =
+        await Supabase.instance.client.from('groups').select().eq('id', groupId).maybeSingle();
+    if (group == null) return;
+    nav.push(MaterialPageRoute(builder: (_) => GroupDashboardPage(group: group)));
+  } catch (_) {}
 }
 
 String roleLabel(String? role) {
@@ -757,6 +787,10 @@ Future<void> main() async {
       settings: const InitializationSettings(
         android: AndroidInitializationSettings('ic_launcher_foreground'),
       ),
+      onDidReceiveNotificationResponse: (response) {
+        final groupId = response.payload;
+        if (groupId != null) _openGroupFromNotification(groupId);
+      },
     );
     await flutterLocalNotificationsPlugin
         .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
@@ -776,6 +810,17 @@ Future<void> main() async {
   // fresh token while the app is running.
   registerFcmToken();
   FirebaseMessaging.instance.onTokenRefresh.listen((_) => registerFcmToken());
+
+  // A tap while the app is backgrounded (not a fresh launch) fires this;
+  // a tap that cold-starts the app is handled by getInitialMessage below.
+  FirebaseMessaging.onMessageOpenedApp.listen((message) {
+    final groupId = message.data['groupId'] as String?;
+    if (groupId != null) _openGroupFromNotification(groupId);
+  });
+  FirebaseMessaging.instance.getInitialMessage().then((message) {
+    final groupId = message?.data['groupId'] as String?;
+    if (groupId != null) _openGroupFromNotification(groupId);
+  });
 
   _initInviteLinkListener();
 
@@ -1688,6 +1733,7 @@ class _HomePageState extends State<HomePage> {
     preloadedGroupsFuture = null;
     WidgetsBinding.instance.addPostFrameCallback((_) => _maybeShowNotificationPrompt());
     WidgetsBinding.instance.addPostFrameCallback((_) => _maybeHandlePendingInvite());
+    WidgetsBinding.instance.addPostFrameCallback((_) => _maybeHandlePendingNotification());
   }
 
   /// Picks up an invite code stashed by [_handleInviteUri] when the app
@@ -1697,6 +1743,15 @@ class _HomePageState extends State<HomePage> {
     if (code == null) return;
     pendingInviteCode = null;
     Navigator.push(context, MaterialPageRoute(builder: (_) => JoinGroupPage(initialCode: code)));
+  }
+
+  /// Picks up a group id stashed by [_openGroupFromNotification] when the
+  /// app wasn't logged in/ready yet to open that group directly.
+  void _maybeHandlePendingNotification() {
+    final groupId = pendingNotificationGroupId;
+    if (groupId == null) return;
+    pendingNotificationGroupId = null;
+    _openGroupFromNotification(groupId);
   }
 
   Future<void> _maybeShowNotificationPrompt() async {
@@ -2156,6 +2211,7 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
   late Future<List<Map<String, dynamic>>> _statsBarFuture;
 
   void _refreshDashboardData() {
+    _settleCoinPayouts(widget.group['id']);
     _hybridJudgeUploadStatusFuture = _hybridJudgeUploadStatus();
     _unreadCountFuture = fetchGroupUnreadCount(widget.group['id']);
     _headerDataFuture = _fetchHeaderData();
@@ -2173,8 +2229,6 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
     _maybeShowChallengePopup();
     _maybeShowWinCelebration();
     _loadSelectedStatKeys();
-    _settleCoinPayouts(widget.group['id']);
-    _loadMyRank();
     _refreshDashboardData();
   }
 
@@ -2281,61 +2335,73 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
         runningLifetimeEarned[userId] = (runningLifetimeEarned[userId] ?? 0) + amount;
       }
 
+      // Each day is isolated (own try/catch) and advances the settlement
+      // watermark on its own, right below — previously one exception
+      // anywhere in the whole date range aborted the loop *and* skipped the
+      // single watermark update at the very end, so every future load
+      // re-attempted the exact same doomed day from scratch and never made
+      // any further progress, silently freezing payouts for the whole group
+      // from that point on. Now a bad day just costs that one day's payout.
       for (var day = startDay; !day.isAfter(yesterday); day = day.add(const Duration(days: 1))) {
         final dayKey = _dateKeyForStreak(day);
-        final daySubs = byDay[dayKey] ?? [];
-        final dayPredictions = predictionsByDay[dayKey] ?? [];
-        String? winnerId;
+        try {
+          final daySubs = byDay[dayKey] ?? [];
+          final dayPredictions = predictionsByDay[dayKey] ?? [];
+          String? winnerId;
 
-        if (daySubs.isNotEmpty) {
-          final outcome = computeDayOutcome(daySubs, scores, isPastDay: true);
-          winnerId = outcome.winnerId;
+          if (daySubs.isNotEmpty) {
+            final outcome = computeDayOutcome(daySubs, scores, isPastDay: true);
+            winnerId = outcome.winnerId;
 
-          if (outcome.winnerId != null) {
-            final winBonus = rankForCoins(runningLifetimeEarned[outcome.winnerId!] ?? 0).winBonus;
-            await award(outcome.winnerId!, 10 + winBonus, 'daily_win', dayKey);
-            if (streakEndingOn(outcome.winnerId!, day) >= 3) {
-              await award(outcome.winnerId!, 5, 'streak_bonus', dayKey);
+            if (outcome.winnerId != null) {
+              final winBonus = rankForCoins(runningLifetimeEarned[outcome.winnerId!] ?? 0).winBonus;
+              await award(outcome.winnerId!, 10 + winBonus, 'daily_win', dayKey);
+              if (streakEndingOn(outcome.winnerId!, day) >= 3) {
+                await award(outcome.winnerId!, 5, 'streak_bonus', dayKey);
+              }
+            }
+
+            for (final judgeId in outcome.judgeIds) {
+              await award(judgeId, 5, 'judging', dayKey);
             }
           }
 
-          for (final judgeId in outcome.judgeIds) {
-            await award(judgeId, 5, 'judging', dayKey);
+          if (dayPredictions.isNotEmpty) {
+            // Predictions pay out from a shared pot: correct predictors split
+            // the incorrect predictors' stakes (plus get their own stake
+            // back). If nobody guessed right (or there was no winner to
+            // guess at all), it's a wash — everyone just gets their stake
+            // refunded, no house edge.
+            final correct = winnerId == null
+                ? <dynamic>[]
+                : dayPredictions.where((p) => p['predicted_user_id'] == winnerId).toList();
+
+            if (correct.isEmpty) {
+              for (final p in dayPredictions) {
+                await award(p['predictor_id'] as String, p['stake'] as int, 'prediction_refund', dayKey);
+              }
+            } else {
+              final totalStake = dayPredictions.fold<int>(0, (sum, p) => sum + (p['stake'] as int));
+              final correctStake = correct.fold<int>(0, (sum, p) => sum + (p['stake'] as int));
+              final bonusEach = (totalStake - correctStake) ~/ correct.length;
+              for (final p in correct) {
+                await award(
+                  p['predictor_id'] as String,
+                  (p['stake'] as int) + bonusEach,
+                  'prediction_payout',
+                  dayKey,
+                );
+              }
+            }
           }
+        } catch (e, st) {
+          FirebaseCrashlytics.instance.recordError(e, st, fatal: false);
         }
 
-        if (dayPredictions.isEmpty) continue;
-
-        // Predictions pay out from a shared pot: correct predictors split the
-        // incorrect predictors' stakes (plus get their own stake back). If
-        // nobody guessed right (or there was no winner to guess at all), it's
-        // a wash — everyone just gets their stake refunded, no house edge.
-        final correct = winnerId == null
-            ? <dynamic>[]
-            : dayPredictions.where((p) => p['predicted_user_id'] == winnerId).toList();
-
-        if (correct.isEmpty) {
-          for (final p in dayPredictions) {
-            await award(p['predictor_id'] as String, p['stake'] as int, 'prediction_refund', dayKey);
-          }
-        } else {
-          final totalStake = dayPredictions.fold<int>(0, (sum, p) => sum + (p['stake'] as int));
-          final correctStake = correct.fold<int>(0, (sum, p) => sum + (p['stake'] as int));
-          final bonusEach = (totalStake - correctStake) ~/ correct.length;
-          for (final p in correct) {
-            await award(
-              p['predictor_id'] as String,
-              (p['stake'] as int) + bonusEach,
-              'prediction_payout',
-              dayKey,
-            );
-          }
-        }
+        await supabase
+            .from('groups')
+            .update({'coins_settled_through': dayKey}).eq('id', groupId);
       }
-
-      await supabase
-          .from('groups')
-          .update({'coins_settled_through': _dateKeyForStreak(yesterday)}).eq('id', groupId);
     } catch (e, st) {
       FirebaseCrashlytics.instance.recordError(e, st, fatal: false);
     }
@@ -3420,12 +3486,12 @@ Future<int> _unreadChatCount() => fetchGroupUnreadCount(widget.group['id']);
               icon: const FaIcon(FontAwesomeIcons.shareNodes, size: 20),
               onPressed: () {
                 final groupName = widget.group['name'] ?? 'my group';
+                final joinUrl = 'https://omrihitner.github.io/my-nemesis/join.html'
+                    '?code=$inviteCode&group=${Uri.encodeComponent(groupName)}';
                 SharePlus.instance.share(
                   ShareParams(
-                    text: '🥊 Join my Nemesis group "$groupName" as a ${roleLabel(role)}!\n\n'
-                        'Tap to join: mynemesis://join?code=$inviteCode\n\n'
-                        'Don\'t have the app yet? Install My Nemesis first, then tap the '
-                        'link again — or enter this code by hand: $inviteCode',
+                    text: '🥊 You\'re invited to join "$groupName" on My Nemesis as a '
+                        '${roleLabel(role)}!\n\nTap to join: $joinUrl',
                   ),
                 );
               },
