@@ -2212,6 +2212,14 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
 
   void _refreshDashboardData() {
     _settleCoinPayouts(widget.group['id']);
+    // Both mini-games otherwise only resolve when someone happens to reopen
+    // that exact page after the deadline passes — which, once a player has
+    // already guessed/entered, they rarely do, so a round would just sit
+    // "resolves at X" forever with nothing actually checking on it. Routing
+    // them through the Dashboard's refresh cycle instead means any normal
+    // visit to the group catches them up.
+    resolveBluffRounds(widget.group['id']);
+    resolvePhotoRouletteRounds(widget.group['id']);
     _hybridJudgeUploadStatusFuture = _hybridJudgeUploadStatus();
     _unreadCountFuture = fetchGroupUnreadCount(widget.group['id']);
     _headerDataFuture = _fetchHeaderData();
@@ -2407,14 +2415,19 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
     }
   }
 
-  Future<void> _maybeShowWinCelebration() async {
+  /// Checked against both yesterday and today (see [_maybeShowWinCelebration])
+  /// since judging can finish after midnight — without checking yesterday
+  /// too, a day that wrapped up late would never get its celebration shown
+  /// at all, since this only ever looked at "today".
+  Future<void> _checkAndCelebrateDay(DateTime day) async {
     final supabase = Supabase.instance.client;
     final user = supabase.auth.currentUser;
     if (user == null) return;
 
-    final today = DateTime.now();
-    final startOfDay = DateTime(today.year, today.month, today.day);
+    final startOfDay = DateTime(day.year, day.month, day.day);
     final endOfDay = startOfDay.add(const Duration(days: 1));
+    final dayKeyForPrefs = '${day.year}-${day.month}-${day.day}';
+    final dayKeyForFreeze = _dateKeyForStreak(startOfDay);
 
     final submissions = await supabase
         .from('submissions')
@@ -2424,6 +2437,27 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
         .lt('submitted_at', endOfDay.toIso8601String());
 
     if (submissions.isEmpty) return;
+
+    // Don't celebrate until everyone expected to play that day actually has
+    // — otherwise whoever gets judged first is crowned the "winner" before
+    // the rest of the group has even had a chance to submit.
+    final members = await supabase
+        .from('group_members')
+        .select()
+        .eq('group_id', widget.group['id'])
+        .inFilter('role', ['owner', 'player', 'judge']);
+    final frozenUserId = widget.group['frozen_user_id'] as String?;
+    final frozenDate = widget.group['frozen_date'] as String?;
+    final expectedIds = members
+        .where((m) =>
+            m['role'] == 'player' ||
+            (m['role'] == 'owner' && (m['owner_is_judge'] != true || m['judge_also_plays'] == true)) ||
+            (m['role'] == 'judge' && m['judge_also_plays'] == true))
+        .map((m) => m['user_id'] as String)
+        .where((id) => !(id == frozenUserId && frozenDate == dayKeyForFreeze))
+        .toSet();
+    final submittedIds = submissions.map((s) => s['user_id'] as String).toSet();
+    if (!expectedIds.every(submittedIds.contains)) return;
 
     final submissionIds = submissions.map((s) => s['id']).toList();
     final scores = await supabase
@@ -2459,8 +2493,7 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
     if (winnerId != user.id) return;
 
     final prefs = await SharedPreferences.getInstance();
-    final todayKey = '${today.year}-${today.month}-${today.day}';
-    final seenKey = 'win_celebrated_${widget.group['id']}_$todayKey';
+    final seenKey = 'win_celebrated_${widget.group['id']}_$dayKeyForPrefs';
     if (prefs.getBool(seenKey) == true) return;
     await prefs.setBool(seenKey, true);
 
@@ -2474,6 +2507,12 @@ class _GroupDashboardPageState extends State<GroupDashboardPage> {
       context: context,
       builder: (_) => _WinCelebrationDialog(score: maxScore),
     );
+  }
+
+  Future<void> _maybeShowWinCelebration() async {
+    final today = DateTime.now();
+    await _checkAndCelebrateDay(today.subtract(const Duration(days: 1)));
+    await _checkAndCelebrateDay(today);
   }
 
   Future<void> _maybeShowChallengePopup() async {
@@ -8094,45 +8133,53 @@ Future<void> resolveBluffRounds(String groupId) async {
         .lte('resolves_at', DateTime.now().toUtc().toIso8601String());
 
     for (final round in dueRounds) {
-      final roundId = round['id'] as String;
-      final guesses = await supabase.from('bluff_guesses').select().eq('round_id', roundId);
+      // Isolated per round — one round's failure shouldn't stop every other
+      // due round in the group from resolving too (same lesson as the coin
+      // settlement loop: a single unhandled exception used to abort the
+      // whole batch).
+      try {
+        final roundId = round['id'] as String;
+        final guesses = await supabase.from('bluff_guesses').select().eq('round_id', roundId);
 
-      final isReal = round['is_real'] as bool;
-      final correct = guesses.where((g) => g['guess'] == isReal).toList();
-      final wrong = guesses.where((g) => g['guess'] != isReal).toList();
-      final wrongPot = wrong.length * kBluffGuessStake;
+        final isReal = round['is_real'] as bool;
+        final correct = guesses.where((g) => g['guess'] == isReal).toList();
+        final wrong = guesses.where((g) => g['guess'] != isReal).toList();
+        final wrongPot = wrong.length * kBluffGuessStake;
 
-      Future<void> award(String userId, int amount, String reason) {
-        return supabase.from('coin_transactions').upsert(
-          {
-            'group_id': groupId,
-            'user_id': userId,
-            'amount': amount,
-            'reason': reason,
-            'reference_id': roundId,
-          },
-          onConflict: 'group_id,user_id,reason,reference_id',
-          ignoreDuplicates: true,
-        );
-      }
-
-      if (correct.isNotEmpty) {
-        final bonusEach = wrongPot ~/ correct.length;
-        for (final g in correct) {
-          await award(g['guesser_id'] as String, kBluffGuessStake + bonusEach, 'bluff_guess_correct');
+        Future<void> award(String userId, int amount, String reason) {
+          return supabase.from('coin_transactions').upsert(
+            {
+              'group_id': groupId,
+              'user_id': userId,
+              'amount': amount,
+              'reason': reason,
+              'reference_id': roundId,
+            },
+            onConflict: 'group_id,user_id,reason,reference_id',
+            ignoreDuplicates: true,
+          );
         }
-        await award(round['submitter_id'] as String, kBluffSubmitStake, 'bluff_submit_refund');
-      } else if (wrong.isNotEmpty) {
-        await award(round['submitter_id'] as String, kBluffSubmitStake + wrongPot, 'bluff_submit_bonus');
-      } else {
-        await award(round['submitter_id'] as String, kBluffSubmitStake, 'bluff_submit_refund');
-      }
 
-      await supabase
-          .from('bluff_rounds')
-          .update({'status': 'resolved'})
-          .eq('id', roundId)
-          .eq('status', 'open');
+        if (correct.isNotEmpty) {
+          final bonusEach = wrongPot ~/ correct.length;
+          for (final g in correct) {
+            await award(g['guesser_id'] as String, kBluffGuessStake + bonusEach, 'bluff_guess_correct');
+          }
+          await award(round['submitter_id'] as String, kBluffSubmitStake, 'bluff_submit_refund');
+        } else if (wrong.isNotEmpty) {
+          await award(round['submitter_id'] as String, kBluffSubmitStake + wrongPot, 'bluff_submit_bonus');
+        } else {
+          await award(round['submitter_id'] as String, kBluffSubmitStake, 'bluff_submit_refund');
+        }
+
+        await supabase
+            .from('bluff_rounds')
+            .update({'status': 'resolved'})
+            .eq('id', roundId)
+            .eq('status', 'open');
+      } catch (e, st) {
+        FirebaseCrashlytics.instance.recordError(e, st, fatal: false);
+      }
     }
   } catch (e, st) {
     FirebaseCrashlytics.instance.recordError(e, st, fatal: false);
@@ -8609,6 +8656,9 @@ Future<void> resolvePhotoRouletteRounds(String groupId) async {
         .inFilter('status', ['pending', 'guessing']);
 
     for (final round in rounds) {
+      // Isolated per round — same reasoning as [resolveBluffRounds]: one
+      // round's failure shouldn't stop every other due round from advancing.
+      try {
       final roundId = round['id'] as String;
       final status = round['status'] as String;
       final photosPerParticipant = round['photos_per_participant'] as int;
@@ -8764,6 +8814,9 @@ Future<void> resolvePhotoRouletteRounds(String groupId) async {
           .update({'status': 'resolved'})
           .eq('id', roundId)
           .eq('status', 'guessing');
+      } catch (e, st) {
+        FirebaseCrashlytics.instance.recordError(e, st, fatal: false);
+      }
     }
   } catch (e, st) {
     FirebaseCrashlytics.instance.recordError(e, st, fatal: false);
